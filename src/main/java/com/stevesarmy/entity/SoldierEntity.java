@@ -421,15 +421,21 @@ public class SoldierEntity extends PathfinderMob implements Container {
         this.entityData.define(HALF_COVER_RISING, false);
         this.entityData.define(RELOAD_PENDING, false);
         this.entityData.define(TACTICAL_RELOADING, false);
+        
         this.entityData.define(THREAT_DIR_X, 0f);
         this.entityData.define(THREAT_DIR_Y, 0f);
         this.entityData.define(THREAT_DIR_Z, 0f);
         this.entityData.define(DEBUG_CQB_PATH, "");
+
         this.entityData.define(FIRE_DISCIPLINE, FireDiscipline.STANDARD.ordinal());
+
         this.entityData.define(FIRE_TEAM, FireTeam.ALPHA.ordinal());
+
         this.entityData.define(YSM_MODEL_ID, "");
         this.entityData.define(YSM_TEXTURE_ID, "");
+
         this.entityData.define(SKIN, "");
+
         this.entityData.define(RECALL_TICKS, 0);
         this.entityData.define(MG_DEBUG_POSITION, BlockPos.ZERO);
         this.entityData.define(MG_DEBUG_CENTER, BlockPos.ZERO);
@@ -924,7 +930,7 @@ public class SoldierEntity extends PathfinderMob implements Container {
 
     @Override
     protected boolean canRide(Entity vehicle) {
-        return VS2Compat.isAuthorizedMount(this, vehicle);
+        return VS2Compat.isAuthorizedMount(this, vehicle) || com.stevesarmy.compat.sbw.SbwCompat.isVehicle(vehicle);
     }
 
     @Override
@@ -1166,6 +1172,11 @@ public class SoldierEntity extends PathfinderMob implements Container {
     }
 
     @Override
+    public boolean stillValid(Player player) {
+        return true;
+    }
+
+    @Override
     public void clearContent() {
         inventory.clearContent();
         setItemSlot(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
@@ -1194,11 +1205,6 @@ public class SoldierEntity extends PathfinderMob implements Container {
     }
 
     @Override
-    public boolean stillValid(Player player) {
-        return this.isAlive() && this.distanceTo(player) <= 64.0F;
-    }
-
-    @Override
     public void tick() {
         super.tick();
 
@@ -1207,6 +1213,7 @@ public class SoldierEntity extends PathfinderMob implements Container {
         }
         
         if (!this.level().isClientSide) {
+            GunIntegration.tick(this);
             syncCqbDebugPath();
             threatAwareness.tick();
             holdMovementForReload();
@@ -1267,6 +1274,9 @@ public class SoldierEntity extends PathfinderMob implements Container {
         tickCoverStuckWatchdog();
 
         long gameTime = level().getGameTime();
+        if (com.stevesarmy.compat.sbw.SbwCompat.isLoaded()) {
+            com.stevesarmy.compat.sbw.SbwCompat.tickVehicle(this);
+        }
         if (VS2Compat.prepareSoldierAi(this)) {
             if (shouldTickGrenadeController(gameTime)) {
                 grenadeTacticalController.tick(getTarget(), getGrenadeSquadIntel());
@@ -1342,6 +1352,7 @@ public class SoldierEntity extends PathfinderMob implements Container {
             TeamManager.removeFromTeam(this);
             com.stevesarmy.combat.cover.CoverReservationManager.releaseAll(this);
             com.stevesarmy.combat.VpbEntityState.remove(this.getUUID());
+            com.stevesarmy.compat.sbw.SbwEntityState.remove(this.getUUID());
             if (this.level() instanceof ServerLevel serverLevel) {
                 com.stevesarmy.squad.SquadManager.get(serverLevel).removeMemberFromSquad(this.getUUID());
                 OwnedSoldierRegistry.get(serverLevel.getServer()).remove(this.getUUID());
@@ -2113,6 +2124,7 @@ public BlockPos getPingMoveTarget() {
         float bodyYaw = approachAngle(this.yBodyRot, movementYaw, CRAWL_TURN_RATE_DEGREES);
         this.setYRot(bodyYaw);
         this.setYBodyRot(bodyYaw);
+        this.setYHeadRot(bodyYaw);
         traceRotationWrite("crawl-facing", previousYaw, previousBodyYaw, previousHeadYaw,
             "movement=" + formatVec(getDeltaMovement()) + ", targetYaw=" + formatAngle(movementYaw));
     }

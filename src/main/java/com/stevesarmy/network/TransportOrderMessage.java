@@ -3,17 +3,23 @@ package com.stevesarmy.network;
 import com.stevesarmy.StevesArmyConfig;
 import com.stevesarmy.compat.AnalogWarfareCompat;
 import com.stevesarmy.compat.VS2Compat;
+import com.stevesarmy.compat.sbw.SbwCompat;
+import com.stevesarmy.compat.sbw.SbwVehicles;
 import com.stevesarmy.entity.SoldierEntity;
 import com.stevesarmy.StevesArmyMod;
 import com.stevesarmy.squad.FireTeam;
 import com.stevesarmy.squad.SquadTargeting;
 import com.stevesarmy.transport.TransportOrder;
+import com.stevesarmy.vehicle.VehicleDriverRegistry;
+import com.stevesarmy.vehicle.VehicleMountPolicy;
+import com.stevesarmy.vehicle.VehicleWreckHandler;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.network.NetworkEvent;
 
@@ -65,8 +71,6 @@ public class TransportOrderMessage {
             ServerLevel level = sender.serverLevel();
 
             switch (msg.getOrder()) {
-                // Crew are excluded from SquadTargeting, so only resolve scoped
-                // soldiers for the infantry orders.
                 case MOUNT -> handleMount(sender, level,
                     SquadTargeting.resolveOrderedSoldiers(level, sender, msg.getScope()), msg.getAimPosition());
                 case DISMOUNT -> handleDismount(sender,
@@ -77,11 +81,6 @@ public class TransportOrderMessage {
         ctx.get().setPacketHandled(true);
     }
 
-    /**
-     * Boards station-less vehicle crew onto the aimed ship. Deliberately does not use
-     * {@link SquadTargeting}: crew are excluded from player orders, and this action
-     * never pulls crew that are actively manning a station.
-     */
     private static void handleMountCrew(ServerPlayer sender, ServerLevel level, Vec3 aimPosition) {
         if (!VS2Compat.isEnabled()) {
             sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.vs2_unavailable"), true);
@@ -114,9 +113,10 @@ public class TransportOrderMessage {
             sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.no_soldiers"), true);
             return;
         }
+        int dismounted = VehicleWreckHandler.dismountAll(soldiers);
+
         boolean handlesAvailable = StevesArmyConfig.VEHICLE_HANDLES_ENABLED.get()
             && AnalogWarfareCompat.isAvailable();
-        int dismounted = 0;
         int handleExits = 0;
         for (SoldierEntity soldier : soldiers) {
             Entity vehicle = soldier.isPassenger() ? soldier.getVehicle() : null;
@@ -127,8 +127,6 @@ public class TransportOrderMessage {
             if (VS2Compat.releaseTransport(soldier)) {
                 dismounted++;
                 if (handle != null) {
-                    // Linked seat: the soldier exits at the handle (the hatch)
-                    // and may stand aboard briefly before ship extraction resumes.
                     if (AnalogWarfareCompat.teleportSoldierToHandle(soldier, handle)) {
                         AnalogWarfareCompat.forget(soldier.getUUID());
                         handleExits++;
@@ -148,10 +146,6 @@ public class TransportOrderMessage {
 
     private static void handleMount(ServerPlayer sender, ServerLevel level,
                                     List<SoldierEntity> soldiers, Vec3 aimPosition) {
-        if (!VS2Compat.isEnabled()) {
-            sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.vs2_unavailable"), true);
-            return;
-        }
         if (soldiers.isEmpty()) {
             sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.no_soldiers"), true);
             return;
@@ -164,7 +158,53 @@ public class TransportOrderMessage {
             return;
         }
 
-        // Crosshair ship first; otherwise the ship the player rides, else the nearest ship.
+        if (SbwCompat.isLoaded()) {
+            Entity targetedVehicle = null;
+            Vec3 eye = sender.getEyePosition();
+            Vec3 look = sender.getViewVector(1.0f);
+            Vec3 end = eye.add(look.scale(64.0));
+            AABB rayBox = sender.getBoundingBox().expandTowards(look.scale(64.0)).inflate(4.0);
+            List<Entity> vehicles = level.getEntitiesOfClass(Entity.class, rayBox, SbwCompat::isVehicle);
+            for (Entity v : vehicles) {
+                if (v.getBoundingBox().inflate(1.5).clip(eye, end).isPresent()) {
+                    targetedVehicle = v;
+                    break;
+                }
+            }
+            if (targetedVehicle == null) {
+                List<Entity> nearAim = level.getEntitiesOfClass(Entity.class, new AABB(aimPosition, aimPosition).inflate(8.0), SbwCompat::isVehicle);
+                if (!nearAim.isEmpty()) {
+                    targetedVehicle = nearAim.get(0);
+                }
+            }
+            if (targetedVehicle != null && !SbwVehicles.isWrecked(targetedVehicle)) {
+                int seated = 0;
+                for (SoldierEntity soldier : eligible) {
+                    if (SbwVehicles.hasFreeSeat(targetedVehicle)) {
+                        soldier.getNavigation().stop();
+                        soldier.cancelCoverMovement();
+                        soldier.setDeltaMovement(Vec3.ZERO);
+                        if (VehicleMountPolicy.board(soldier, targetedVehicle)) {
+                            VehicleDriverRegistry.onBoarded(soldier, targetedVehicle);
+                            seated++;
+                        }
+                    }
+                }
+                StevesArmyMod.LOGGER.info("[Transport] MOUNT by {}: eligible={} seated={} (via SBW)", sender.getName().getString(), eligible.size(), seated);
+                if (seated == 0) {
+                    sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.no_free_seats"), true);
+                } else {
+                    sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.seated", seated, eligible.size()), true);
+                }
+                return;
+            }
+        }
+
+        if (!VS2Compat.isEnabled()) {
+            sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.vs2_unavailable"), true);
+            return;
+        }
+
         Vec3 searchCenter = aimPosition;
         Object ship = VS2Compat.getShipAt(level, BlockPos.containing(aimPosition));
         if (ship == null) {
@@ -176,14 +216,10 @@ public class TransportOrderMessage {
             return;
         }
 
-        // Crew soldiers board shipyard seats exactly like riflemen; their crew AI
-        // keeps ticking once seated (crewSeated), so they still man their station.
         List<SoldierEntity> remaining = new ArrayList<>(eligible);
         int seated = 0;
         int viaHandles = 0;
 
-        // Handle-linked seats first (VS Analog Warfare vehicle mount handles);
-        // soldiers without a free link fall back to the plain free-seat scan.
         if (StevesArmyConfig.VEHICLE_HANDLES_ENABLED.get() && AnalogWarfareCompat.isAvailable()) {
             viaHandles = AnalogWarfareCompat.mountViaHandles(level, ship, searchCenter, remaining);
             seated += viaHandles;
@@ -201,6 +237,24 @@ public class TransportOrderMessage {
                 if (VS2Compat.seatSoldierDirect(soldier, level, seats.get(0))) {
                     seats.remove(0);
                     seated++;
+                }
+            }
+        }
+
+        if (!remaining.isEmpty()) {
+            Long shipId = VS2Compat.getShipIdOf(ship);
+            if (shipId != null) {
+                for (SoldierEntity soldier : new ArrayList<>(remaining)) {
+                    Entity freeSeat = VS2Compat.findFreeSeatEntityNear(soldier, 16.0);
+                    if (freeSeat != null) {
+                        soldier.getNavigation().stop();
+                        soldier.cancelCoverMovement();
+                        soldier.setDeltaMovement(Vec3.ZERO);
+                        if (VS2Compat.seatSoldierOnSeatEntity(soldier, freeSeat)) {
+                            remaining.remove(soldier);
+                            seated++;
+                        }
+                    }
                 }
             }
         }

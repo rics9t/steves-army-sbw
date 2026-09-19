@@ -48,12 +48,13 @@ public class KeyInputHandler {
             } else {
                 FireTeam current = FireTeamScopeState.INSTANCE.getCurrentScope();
                 int teamCount = FireTeamScopeState.INSTANCE.getTeamCount();
-                FireTeam next;
-                if (current == FireTeam.ALL || current.ordinal() >= teamCount) {
-                    next = FireTeam.values()[1];
-                } else {
-                    next = FireTeam.values()[current.ordinal() + 1];
+                
+                int nextOrdinal = current.ordinal() + 1;
+                if (nextOrdinal > teamCount) {
+                    nextOrdinal = 0;
                 }
+                FireTeam next = FireTeam.values()[nextOrdinal];
+
                 FireTeamScopeState.INSTANCE.setCurrentScope(next, "cycle key");
                 mc.player.displayClientMessage(Component.literal("[" + next.getShortName() + "]"), true);
             }

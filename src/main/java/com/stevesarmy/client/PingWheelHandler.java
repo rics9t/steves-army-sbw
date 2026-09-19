@@ -1,6 +1,7 @@
 package com.stevesarmy.client;
 
 import com.stevesarmy.StevesArmyMod;
+import com.stevesarmy.compat.sbw.SbwCompat;
 import com.stevesarmy.network.NetworkHandler;
 import com.stevesarmy.network.PingMessage;
 import com.stevesarmy.ping.PingType;
@@ -8,11 +9,14 @@ import com.stevesarmy.transport.TransportOrder;
 import com.stevesarmy.util.RateLimiter;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.AbstractGlassBlock;
 import net.minecraft.world.level.block.StainedGlassPaneBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.EntityHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import org.lwjgl.glfw.GLFW;
@@ -20,17 +24,17 @@ import org.lwjgl.glfw.GLFW;
 public class PingWheelHandler {
     private static final RateLimiter rateLimiter = new RateLimiter();
     private static final int HOLD_TIME_MS = 150;
-    
+
     private static boolean isWheelActive = false;
     private static boolean wasKeyDown = false;
     private static long pressStartTime = 0;
     private static double pressMouseX = 0;
     private static double pressMouseY = 0;
-    
+
     private static float savedYaw = 0;
     private static float savedPitch = 0;
     private static PingType currentHoveredType = PingType.LOCATION;
-    
+
     public static void tick() {
         Minecraft mc = Minecraft.getInstance();
         if (mc.player == null || mc.level == null) {
@@ -41,10 +45,9 @@ public class PingWheelHandler {
             wasKeyDown = false;
             return;
         }
-        
+
         boolean isKeyDown = KeyBindings.isPingWheelKeyDown();
 
-        // Skip if Ctrl is held and fire team wheel is enabled (it takes priority)
         long window = mc.getWindow().getWindow();
         boolean ctrlHeld = GLFW.glfwGetKey(window, GLFW.GLFW_KEY_LEFT_CONTROL) == GLFW.GLFW_PRESS
             || GLFW.glfwGetKey(window, GLFW.GLFW_KEY_RIGHT_CONTROL) == GLFW.GLFW_PRESS;
@@ -74,9 +77,6 @@ public class PingWheelHandler {
         if (!isKeyDown && wasKeyDown && isWheelActive) {
             long holdTime = System.currentTimeMillis() - pressStartTime;
 
-            // grabMouse() below recenters the cursor, so the vehicle-page hover must be
-            // captured before the mouse is re-grabbed; the ping path uses the type that
-            // the renderer cached while the wheel was open.
             TransportOrder vehicleAction = WheelCycleController.isVehiclePage()
                 ? VehicleWheelHandler.getHoveredAction() : null;
 
@@ -104,81 +104,101 @@ public class PingWheelHandler {
             isWheelActive = false;
             PingWheelRenderer.resetLogFlag();
         }
-        
+
         wasKeyDown = isKeyDown;
     }
-    
+
     private static void grabMouseForWheel(Minecraft mc) {
         long windowHandle = mc.getWindow().getWindow();
         int width = mc.getWindow().getWidth();
         int height = mc.getWindow().getHeight();
-        
+
         GLFW.glfwSetCursorPos(windowHandle, width / 2.0, height / 2.0);
-        
+
         pressMouseX = width / 2.0;
         pressMouseY = height / 2.0;
-        
+
         mc.mouseHandler.releaseMouse();
     }
-    
+
     private static void releaseMouse(Minecraft mc) {
         mc.mouseHandler.grabMouse();
     }
-    
+
     private static PingType determinePingTypeFromMouse(Minecraft mc) {
         long windowHandle = mc.getWindow().getWindow();
         double[] xpos = new double[1];
         double[] ypos = new double[1];
         GLFW.glfwGetCursorPos(windowHandle, xpos, ypos);
-        
+
         double currentX = xpos[0];
         double currentY = ypos[0];
-        
+
         double deltaX = currentX - pressMouseX;
         double deltaY = currentY - pressMouseY;
-        
+
         double distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
-        
+
         StevesArmyMod.LOGGER.info("Mouse delta: ({}, {}) distance: {}", deltaX, deltaY, distance);
-        
+
         if (distance < 30) {
             StevesArmyMod.LOGGER.info("Center area selected, returning LOCATION");
             return PingType.LOCATION;
         }
-        
+
         double angle = Math.atan2(deltaY, deltaX);
         double degrees = Math.toDegrees(angle);
-        
+
         double adjustedDegrees = degrees + 90;
         if (adjustedDegrees < 0) adjustedDegrees += 360;
         if (adjustedDegrees >= 360) adjustedDegrees -= 360;
-        
+
         int numTypes = PingType.values().length;
         double sectorSize = 360.0 / numTypes;
         int sector = ((int) (adjustedDegrees / sectorSize)) % numTypes;
         PingType selectedType = PingType.values()[sector];
-        
-        StevesArmyMod.LOGGER.info("Angle: {} deg, adjusted: {} deg, sector: {}, type: {}", 
-            String.format("%.1f", degrees), 
-            String.format("%.1f", adjustedDegrees), 
-            sector, 
+
+        StevesArmyMod.LOGGER.info("Angle: {} deg, adjusted: {} deg, sector: {}, type: {}",
+            String.format("%.1f", degrees),
+            String.format("%.1f", adjustedDegrees),
+            sector,
             selectedType);
-        
+
         return selectedType;
     }
-    
+
     private static void sendPing(Minecraft mc, PingType type) {
         LocalPlayer player = mc.player;
         if (player == null) return;
 
         Vec3 pingPos = findCrosshairPosition(mc);
-
         int dimension = player.level().dimension().location().hashCode();
 
-        StevesArmyMod.LOGGER.info("Ping position: {} type: {}", pingPos, type);
+        Entity hitEntity = findCrosshairEntity(mc);
+        int targetId = hitEntity != null ? hitEntity.getId() : -1;
 
-        PingMessage message = new PingMessage(type, pingPos, dimension, FireTeamScopeState.INSTANCE.getCurrentScope());
+        if (type == PingType.GO_TO && hitEntity != null && SbwCompat.isVehicle(hitEntity)) {
+            NetworkHandler.INSTANCE.sendToServer(new com.stevesarmy.network.TransportOrderMessage(
+                TransportOrder.MOUNT, hitEntity.position(), FireTeamScopeState.INSTANCE.getCurrentScope()));
+            StevesArmyMod.LOGGER.info("Sent MOUNT order for SBW vehicle via GO_TO intercept");
+            return;
+        }
+
+        PingMessage message = new PingMessage(type, pingPos, dimension, FireTeamScopeState.INSTANCE.getCurrentScope(), targetId);
         NetworkHandler.INSTANCE.sendToServer(message);
+    }
+
+    public static Entity findCrosshairEntity(Minecraft mc) {
+        if (mc.player == null) return null;
+        double distance = mc.options.renderDistance().get() * 16.0;
+        Vec3 eye = mc.player.getEyePosition(1.0f);
+        Vec3 look = mc.player.getViewVector(1.0f);
+        Vec3 end = eye.add(look.scale(distance));
+        AABB aabb = mc.player.getBoundingBox().expandTowards(look.scale(distance)).inflate(2.0);
+        EntityHitResult hit = net.minecraft.world.entity.projectile.ProjectileUtil.getEntityHitResult(
+            mc.player, eye, end, aabb, e -> !e.isSpectator() && e.isPickable(), distance * distance
+        );
+        return hit != null ? hit.getEntity() : null;
     }
 
     /** Crosshair world position, continuing through glass and non-colliding vegetation. */
@@ -200,10 +220,6 @@ public class PingWheelHandler {
         return eyePos.add(lookVec.scale(maxDistance));
     }
 
-    /**
-     * Continues through glass and non-colliding vegetation, but retains thin
-     * collidable blocks such as fences and rails as valid ping targets.
-     */
     private static BlockHitResult clipPingTarget(LocalPlayer player, Vec3 start, Vec3 end, Vec3 direction) {
         Vec3 rayStart = start;
         for (int ignoredBlocks = 0; ignoredBlocks < 64; ignoredBlocks++) {
@@ -218,7 +234,6 @@ public class PingWheelHandler {
                 return hit;
             }
 
-            // Move beyond the hit point so the next clip cannot hit this block again.
             rayStart = hit.getLocation().add(direction.scale(0.001));
         }
 
@@ -232,11 +247,11 @@ public class PingWheelHandler {
             || state.getBlock() instanceof StainedGlassPaneBlock
             || state.getCollisionShape(player.level(), hit.getBlockPos()).isEmpty();
     }
-    
+
     public static boolean isWheelActive() {
         return isWheelActive;
     }
-    
+
     public static double getDeltaX() {
         Minecraft mc = Minecraft.getInstance();
         long windowHandle = mc.getWindow().getWindow();
@@ -244,7 +259,7 @@ public class PingWheelHandler {
         GLFW.glfwGetCursorPos(windowHandle, xpos, null);
         return xpos[0] - pressMouseX;
     }
-    
+
     public static double getDeltaY() {
         Minecraft mc = Minecraft.getInstance();
         long windowHandle = mc.getWindow().getWindow();
@@ -252,7 +267,7 @@ public class PingWheelHandler {
         GLFW.glfwGetCursorPos(windowHandle, null, ypos);
         return ypos[0] - pressMouseY;
     }
-    
+
     public static PingType getHoveredType() {
         Minecraft mc = Minecraft.getInstance();
         currentHoveredType = determinePingTypeFromMouse(mc);

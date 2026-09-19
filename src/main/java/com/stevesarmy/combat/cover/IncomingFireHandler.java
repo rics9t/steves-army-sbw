@@ -43,6 +43,7 @@ public class IncomingFireHandler {
     private static final double NEAR_MISS_THRESHOLD = 3.0;
 
     private static final Map<Entity, BulletSnapshot> trackedBullets = new HashMap<>();
+    private static final Map<Entity, BulletSnapshot> trackedSbwProjectiles = new HashMap<>();
 
     // CBC projectile tracking
     private static final String CBC_PACKAGE = "rbasamoyai.createbigcannons.munitions.";
@@ -66,6 +67,8 @@ public class IncomingFireHandler {
             trackedBullets.put(entity, null);
         } else if (isCbcLoaded() && isCbcProjectile(entity)) {
             trackedCbcProjectiles.put(entity, null);
+        } else if (com.stevesarmy.compat.sbw.SbwCompat.isLoaded() && com.stevesarmy.compat.sbw.SbwCompat.isSbwProjectile(entity)) {
+            trackedSbwProjectiles.put(entity, null);
         }
     }
 
@@ -91,6 +94,30 @@ public class IncomingFireHandler {
             Vec3 currentPos = bullet.position();
             Vec3 currentDelta = bullet.getDeltaMovement();
             float speed = (float)currentDelta.length();
+
+            if (prev != null) {
+                Vec3 prevEnd = prev.pos.add(prev.delta);
+                checkNearMissLineSegment(bullet.level(), prev.pos, prevEnd, speed, shooter, prev.firingOrigin);
+            }
+
+            Vec3 firingOrigin = prev != null ? prev.firingOrigin : currentPos;
+            entry.setValue(new BulletSnapshot(currentPos, currentDelta, firingOrigin));
+            return false;
+        });
+        
+        trackedSbwProjectiles.entrySet().removeIf(entry -> {
+            Entity bullet = entry.getKey();
+            if (!bullet.isAlive()) return true;
+
+            LivingEntity shooter = null;
+            if (bullet instanceof Projectile proj) {
+                shooter = proj.getOwner() instanceof LivingEntity owner ? owner : null;
+            }
+
+            BulletSnapshot prev = entry.getValue();
+            Vec3 currentPos = bullet.position();
+            Vec3 currentDelta = bullet.getDeltaMovement();
+            float speed = (float) currentDelta.length();
 
             if (prev != null) {
                 Vec3 prevEnd = prev.pos.add(prev.delta);

@@ -8,20 +8,21 @@ public enum PingType {
     FOLLOW(0xFF55FFFF, "follow"),
     HOLD(0xFFFFAA00, "hold"),
     SUPPRESS_AREA(0xFFFF0000, "suppress_area"),
-    ATTACK(0xFFFF4444, "attack");
-    
+    ATTACK(0xFFFF4444, "attack"),
+    DISMOUNT(0xFF888888, "dismount");
+
     private final int color;
     private final String translationKey;
-    
+
     PingType(int color, String translationKey) {
         this.color = color;
         this.translationKey = translationKey;
     }
-    
+
     public int getColor() {
         return color;
     }
-    
+
     public String getTranslationKey() {
         return "ping.steves_army." + translationKey;
     }
