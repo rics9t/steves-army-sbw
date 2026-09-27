@@ -1,0 +1,168 @@
+package com.stevesarmy.network;
+
+import com.stevesarmy.client.ClientArmorDoctrineDebugData;
+import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.world.phys.Vec3;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.fml.DistExecutor;
+import net.minecraftforge.network.NetworkEvent;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
+import java.util.function.Supplier;
+
+/**
+ * Owner-only debug snapshots for the armor doctrine: hard-target contacts
+ * known to nearby squads, and the per-soldier role/gate state that drives
+ * the hide, displace, suppress, and hunter-engage reactions.
+ */
+public final class ArmorDoctrineDebugPacket {
+    private static final int MAX_CONTACTS = 16;
+    private static final int MAX_SOLDIERS = 48;
+
+    public record Contact(UUID threatId, Vec3 aimPoint, Vec3 hullCenter, Vec3 velocity,
+                          Vec3[] hullCorners, boolean suppressed, long ageTicks, double accuracy,
+                          int vehicleClass) {}
+
+    public record Soldier(UUID soldierId, Vec3 pos, boolean hunter, boolean launcherHeld,
+                          boolean launcherStored, boolean vehicleSelected, double contactDistance,
+                          String heldGunId, String peekState, boolean lowCrouching, boolean crawlMoving,
+                          boolean reloading, boolean bolting, boolean drawing, float adsProgress,
+                          long shootCooldown, int ammo, Vec3 coverPos, Vec3 firingSolution,
+                          String combatState) {}
+
+    private final int mode;
+    private final List<Contact> contacts;
+    private final List<Soldier> soldiers;
+
+    public ArmorDoctrineDebugPacket(int mode, List<Contact> contacts, List<Soldier> soldiers) {
+        this.mode = mode;
+        this.contacts = List.copyOf(contacts);
+        this.soldiers = List.copyOf(soldiers);
+    }
+
+    public ArmorDoctrineDebugPacket(FriendlyByteBuf buf) {
+        mode = buf.readVarInt();
+        int contactCount = Math.min(buf.readVarInt(), MAX_CONTACTS);
+        List<Contact> decodedContacts = new ArrayList<>(contactCount);
+        for (int i = 0; i < contactCount; i++) {
+            decodedContacts.add(new Contact(buf.readUUID(), readVec(buf), readVec(buf),
+                readNullableVec(buf), readVecArray(buf), buf.readBoolean(), buf.readVarInt(),
+                buf.readFloat(), buf.readVarInt()));
+        }
+        int soldierCount = Math.min(buf.readVarInt(), MAX_SOLDIERS);
+        List<Soldier> decodedSoldiers = new ArrayList<>(soldierCount);
+        for (int i = 0; i < soldierCount; i++) {
+            decodedSoldiers.add(new Soldier(buf.readUUID(), readVec(buf), buf.readBoolean(),
+                buf.readBoolean(), buf.readBoolean(), buf.readBoolean(), buf.readDouble(),
+                buf.readUtf(), buf.readUtf(), buf.readBoolean(), buf.readBoolean(), buf.readBoolean(),
+                buf.readBoolean(), buf.readBoolean(), buf.readFloat(), buf.readLong(), buf.readVarInt(),
+                readNullableVec(buf), readNullableVec(buf), buf.readUtf()));
+        }
+        contacts = List.copyOf(decodedContacts);
+        soldiers = List.copyOf(decodedSoldiers);
+    }
+
+    public static void encode(ArmorDoctrineDebugPacket packet, FriendlyByteBuf buf) {
+        buf.writeVarInt(packet.mode);
+        buf.writeVarInt(Math.min(packet.contacts.size(), MAX_CONTACTS));
+        for (int i = 0; i < packet.contacts.size() && i < MAX_CONTACTS; i++) {
+            Contact contact = packet.contacts.get(i);
+            buf.writeUUID(contact.threatId());
+            writeVec(buf, contact.aimPoint());
+            writeVec(buf, contact.hullCenter());
+            writeNullableVec(buf, contact.velocity());
+            writeVecArray(buf, contact.hullCorners());
+            buf.writeBoolean(contact.suppressed());
+            buf.writeVarInt((int) Math.min(contact.ageTicks(), Integer.MAX_VALUE));
+            buf.writeFloat((float) contact.accuracy());
+            buf.writeVarInt(contact.vehicleClass());
+        }
+        buf.writeVarInt(Math.min(packet.soldiers.size(), MAX_SOLDIERS));
+        for (int i = 0; i < packet.soldiers.size() && i < MAX_SOLDIERS; i++) {
+            Soldier soldier = packet.soldiers.get(i);
+            buf.writeUUID(soldier.soldierId());
+            writeVec(buf, soldier.pos());
+            buf.writeBoolean(soldier.hunter());
+            buf.writeBoolean(soldier.launcherHeld());
+            buf.writeBoolean(soldier.launcherStored());
+            buf.writeBoolean(soldier.vehicleSelected());
+            buf.writeDouble(soldier.contactDistance());
+            buf.writeUtf(soldier.heldGunId() == null ? "" : soldier.heldGunId());
+            buf.writeUtf(soldier.peekState() == null ? "" : soldier.peekState());
+            buf.writeBoolean(soldier.lowCrouching());
+            buf.writeBoolean(soldier.crawlMoving());
+            buf.writeBoolean(soldier.reloading());
+            buf.writeBoolean(soldier.bolting());
+            buf.writeBoolean(soldier.drawing());
+            buf.writeFloat(soldier.adsProgress());
+            buf.writeLong(soldier.shootCooldown());
+            buf.writeVarInt(soldier.ammo());
+            writeNullableVec(buf, soldier.coverPos());
+            writeNullableVec(buf, soldier.firingSolution());
+            buf.writeUtf(soldier.combatState() == null ? "idle" : soldier.combatState());
+        }
+    }
+
+    public static void handle(ArmorDoctrineDebugPacket packet, Supplier<NetworkEvent.Context> ctx) {
+        ctx.get().enqueueWork(() -> DistExecutor.unsafeRunWhenOn(Dist.CLIENT,
+            () -> () -> ClientArmorDoctrineDebugData.INSTANCE.receive(packet)));
+        ctx.get().setPacketHandled(true);
+    }
+
+    public int mode() { return mode; }
+    public List<Contact> contacts() { return contacts; }
+    public List<Soldier> soldiers() { return soldiers; }
+
+    private static void writeVec(FriendlyByteBuf buf, Vec3 value) {
+        buf.writeDouble(value.x);
+        buf.writeDouble(value.y);
+        buf.writeDouble(value.z);
+    }
+
+    private static Vec3 readVec(FriendlyByteBuf buf) {
+        return new Vec3(buf.readDouble(), buf.readDouble(), buf.readDouble());
+    }
+
+    private static void writeNullableVec(FriendlyByteBuf buf, Vec3 value) {
+        buf.writeBoolean(value != null);
+        if (value != null) writeVec(buf, value);
+    }
+
+    private static Vec3 readNullableVec(FriendlyByteBuf buf) {
+        return buf.readBoolean() ? readVec(buf) : null;
+    }
+
+    private static void writeVecArray(FriendlyByteBuf buf, Vec3[] values) {
+        if (values == null) {
+            buf.writeVarInt(0);
+            return;
+        }
+        buf.writeVarInt(values.length);
+        for (Vec3 value : values) {
+            writeVec(buf, value);
+        }
+    }
+
+    private static Vec3[] readVecArray(FriendlyByteBuf buf) {
+        int count = Math.min(buf.readVarInt(), 8);
+        if (count == 0) {
+            return null;
+        }
+        Vec3[] values = new Vec3[count];
+        for (int i = 0; i < count; i++) {
+            values[i] = readVec(buf);
+        }
+        return values;
+    }
+
+    private static void writeNullableUuid(FriendlyByteBuf buf, UUID value) {
+        buf.writeBoolean(value != null);
+        if (value != null) buf.writeUUID(value);
+    }
+
+    private static UUID readNullableUuid(FriendlyByteBuf buf) {
+        return buf.readBoolean() ? buf.readUUID() : null;
+    }
+}

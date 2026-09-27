@@ -90,14 +90,6 @@ public class PingMessage {
 
             List<SoldierEntity> owned = SquadTargeting.resolveOrderedSoldiers(level, sender, scope);
 
-            if (type == PingType.DISMOUNT) {
-                for (SoldierEntity soldier : owned) {
-                    if (soldier.isPassenger()) {
-                        soldier.stopRiding();
-                    }
-                }
-            }
-
             // GO_TO, SEND, and ATTACK should also clear stale ATTACK state
             if (type == PingType.GO_TO || type == PingType.SEND || type == PingType.ATTACK) {
                 for (SoldierEntity soldier : owned) {

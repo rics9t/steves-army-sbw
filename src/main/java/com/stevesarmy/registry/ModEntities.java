@@ -2,10 +2,10 @@ package com.stevesarmy.registry;
 
 import com.stevesarmy.StevesArmyMod;
 import com.stevesarmy.entity.EnemySoldierEntity;
+import com.stevesarmy.entity.EnemyVehicleCrewEntity;
 import com.stevesarmy.entity.GarrisonEntity;
 import com.stevesarmy.entity.MachineGunnerEntity;
 import com.stevesarmy.entity.SoldierEntity;
-import com.stevesarmy.entity.ResupplyPouchEntity;
 import com.stevesarmy.entity.SupportEntity;
 import com.stevesarmy.entity.TargetEntity;
 import com.stevesarmy.entity.TeamGarrisonEntity;
@@ -100,14 +100,40 @@ public class ModEntities {
             .build(StevesArmyMod.MODID + ":vehicle_crew")
     );
 
-    public static final RegistryObject<EntityType<ResupplyPouchEntity>> RESUPPLY_POUCH = ENTITIES.register(
-        "resupply_pouch",
-        () -> EntityType.Builder.of(ResupplyPouchEntity::new, MobCategory.MISC)
+    public static final RegistryObject<EntityType<EnemyVehicleCrewEntity>> ENEMY_VEHICLE_CREW = ENTITIES.register(
+        "enemy_vehicle_crew",
+        () -> EntityType.Builder.of(EnemyVehicleCrewEntity::new, MobCategory.MONSTER)
+            .sized(0.6F, 1.8F)
+            .clientTrackingRange(10)
+            .updateInterval(3)
+            .build(StevesArmyMod.MODID + ":enemy_vehicle_crew")
+    );
+
+    public static final RegistryObject<EntityType<com.stevesarmy.entity.AntiTankEntity>> ANTI_TANK = ENTITIES.register(
+        "anti_tank",
+        () -> EntityType.Builder.of(com.stevesarmy.entity.AntiTankEntity::new, MobCategory.CREATURE)
+            .sized(0.6F, 1.8F)
+            .clientTrackingRange(10)
+            .updateInterval(3)
+            .build(StevesArmyMod.MODID + ":anti_tank")
+    );
+
+    public static final RegistryObject<EntityType<com.stevesarmy.entity.EnemyAntiTankEntity>> ENEMY_ANTI_TANK = ENTITIES.register(
+        "enemy_anti_tank",
+        () -> EntityType.Builder.of(com.stevesarmy.entity.EnemyAntiTankEntity::new, MobCategory.MONSTER)
+            .sized(0.6F, 1.8F)
+            .clientTrackingRange(10)
+            .updateInterval(3)
+            .build(StevesArmyMod.MODID + ":enemy_anti_tank")
+    );
+
+    public static final RegistryObject<EntityType<com.stevesarmy.entity.SupplyPouchProjectile>> SUPPLY_POUCH = ENTITIES.register(
+        "supply_pouch",
+        () -> EntityType.Builder.<com.stevesarmy.entity.SupplyPouchProjectile>of(com.stevesarmy.entity.SupplyPouchProjectile::new, MobCategory.MISC)
             .sized(0.25F, 0.25F)
-            .clientTrackingRange(16)
-            .updateInterval(1)
-            .noSave()
-            .build(StevesArmyMod.MODID + ":resupply_pouch")
+            .clientTrackingRange(4)
+            .updateInterval(10)
+            .build(StevesArmyMod.MODID + ":supply_pouch")
     );
 
     @SubscribeEvent
@@ -163,6 +189,30 @@ public class ModEntities {
             .build());
 
         event.put(VEHICLE_CREW.get(), Monster.createMonsterAttributes()
+            .add(Attributes.MAX_HEALTH, 20.0D)
+            .add(Attributes.MOVEMENT_SPEED, 0.35D)
+            .add(Attributes.ARMOR, 4.0D)
+            .add(Attributes.ATTACK_DAMAGE, 3.0D)
+            .add(Attributes.FOLLOW_RANGE, 32.0D)
+            .build());
+
+        event.put(ENEMY_VEHICLE_CREW.get(), Monster.createMonsterAttributes()
+            .add(Attributes.MAX_HEALTH, 20.0D)
+            .add(Attributes.MOVEMENT_SPEED, 0.35D)
+            .add(Attributes.ARMOR, 4.0D)
+            .add(Attributes.ATTACK_DAMAGE, 3.0D)
+            .add(Attributes.FOLLOW_RANGE, 32.0D)
+            .build());
+
+        event.put(ANTI_TANK.get(), Monster.createMonsterAttributes()
+            .add(Attributes.MAX_HEALTH, 20.0D)
+            .add(Attributes.MOVEMENT_SPEED, 0.35D)
+            .add(Attributes.ARMOR, 4.0D)
+            .add(Attributes.ATTACK_DAMAGE, 3.0D)
+            .add(Attributes.FOLLOW_RANGE, 32.0D)
+            .build());
+
+        event.put(ENEMY_ANTI_TANK.get(), Monster.createMonsterAttributes()
             .add(Attributes.MAX_HEALTH, 20.0D)
             .add(Attributes.MOVEMENT_SPEED, 0.35D)
             .add(Attributes.ARMOR, 4.0D)

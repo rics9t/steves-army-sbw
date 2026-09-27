@@ -3,6 +3,7 @@ package com.stevesarmy.compat;
 import com.stevesarmy.StevesArmyConfig;
 import com.stevesarmy.StevesArmyMod;
 import com.stevesarmy.combat.StationGunnerAI;
+import com.stevesarmy.compat.SbwCompat;
 import com.stevesarmy.entity.SoldierEntity;
 import com.stevesarmy.entity.SoldierRole;
 import com.stevesarmy.squad.SquadMode;
@@ -64,6 +65,11 @@ public final class VS2Compat {
     private static final double RESEAT_PIN_EPSILON = 2.0;
     /** Ticks between station duty scans for a seated crew soldier without a station. */
     private static final int CREW_DUTY_SCAN_INTERVAL_TICKS = 20;
+    /**
+     * World-space distance within which a seat entity of unknown ship is attributed
+     * to the clicked ship — its rendered world position matches the clicked seat block.
+     */
+    private static final double SEAT_CLICK_WORLD_TOLERANCE_SQR = 3.0 * 3.0;
 
     private static volatile boolean initialized;
     private static volatile boolean available;
@@ -108,7 +114,11 @@ public final class VS2Compat {
     private VS2Compat() {}
 
     public static boolean isEnabled() {
-        initialize();
+        // Visibility rays call this several times per ray; enter the synchronized
+        // initializer only before the first successful resolution.
+        if (!initialized) {
+            initialize();
+        }
         return available && StevesArmyConfig.VS2_COMPAT_ENABLED.get();
     }
 
@@ -783,6 +793,60 @@ public final class VS2Compat {
         return true;
     }
 
+    /**
+     * Mounts the soldier directly on a plain world-space vehicle entity (Superb
+     * Warfare). The fourth seat primitive beside SeatBlock/contraption/seat-entity
+     * mounts: vanilla {@code startRiding} with a pending {@code authorizedMounts}
+     * entry, then the SBW seat placement (gunner seats before the driver seat, so
+     * the wheel stays free for a player). Command-driven and ship-less:
+     * {@code transportShipId} and {@code transportSeatPosition} both stay null —
+     * that pair is the marker {@link #waitForReseat} uses to release instead of
+     * re-seating when the vanilla passenger link is gone. No manual passenger
+     * sync: a world-space entity is vanilla-tracked.
+     */
+    public static boolean seatSoldierOnEntity(SoldierEntity soldier, Entity vehicle,
+                                              boolean preferGunnerSeat) {
+        if (soldier.isPassenger() || vehicle == null || vehicle.isRemoved()) {
+            return false;
+        }
+        Vec3 preMountPos = soldier.position();
+        authorizedMounts.put(soldier.getUUID(), vehicle.getUUID());
+        try {
+            soldier.startRiding(vehicle, true);
+        } finally {
+            authorizedMounts.remove(soldier.getUUID());
+        }
+        if (!soldier.isPassenger() || soldier.getVehicle() != vehicle) {
+            return false;
+        }
+
+        SoldierState state = getOrCreateState(soldier);
+        state.transportAnchorId = vehicle.getUUID();
+        state.transportOwnerId = null;
+        state.transportShipId = null;
+        state.transportSeatPosition = null;
+        state.seatRetryCooldownTicks = 0;
+        state.reseatWaitTicks = 0;
+        state.reboardBlockTicks = 0;
+        state.crewSeated = soldier.getRole() == SoldierRole.VEHICLE_CREW;
+        // Egg-spawned / command-mounted crew never stood on foot near here: remember
+        // the pre-mount spot as the recovery target if the vehicle is ever gone.
+        if (isWorldPlausible(preMountPos)) {
+            state.lastSafeWorldPosition = BlockPos.containing(preMountPos.x, preMountPos.y, preMountPos.z);
+        }
+
+        vehicle.positionRider(soldier);
+        int seat = SbwCompat.seatIndexOf(vehicle, soldier);
+        int wanted = SbwCompat.firstFreeSeat(vehicle, preferGunnerSeat);
+        if (wanted >= 0 && wanted != seat) {
+            SbwCompat.changeSeat(vehicle, soldier, wanted);
+        }
+        StevesArmyMod.LOGGER.info("[VS2] seatSoldierOnEntity: mounted soldier={} vehicle={} vehicleClass={} seat {} -> {}",
+            soldier.getId(), vehicle.getId(), vehicle.getClass().getSimpleName(), seat,
+            SbwCompat.seatIndexOf(vehicle, soldier));
+        return true;
+    }
+
     /** Allows only the immediate Create seat mount initiated by tryContraptionSeat or tryStaticSeat. */
     public static boolean isAuthorizedMount(SoldierEntity soldier, Entity vehicle) {
         if (vehicle == null) {
@@ -837,6 +901,18 @@ public final class VS2Compat {
     public static boolean seatSoldierDirect(SoldierEntity soldier, Level level, BlockPos seatBlockPos) {
         initialize();
         if (!available) return false;
+        // Mounting onto a taken seat block would stack a second SeatEntity on the
+        // same shipyard position; that duplicate is what later hijacks player seat
+        // clicks across ships (Create's occupant swap). Refuse and let the caller
+        // fall back to another seat or the reseat timeout.
+        if (!createSeatBlockClass.isInstance(level.getBlockState(seatBlockPos).getBlock())) {
+            StevesArmyMod.LOGGER.info("[VS2] seatSoldierDirect: no SeatBlock at {} — refusing", seatBlockPos);
+            return false;
+        }
+        if (level instanceof ServerLevel serverLevel && isCreateSeatOccupied(serverLevel, seatBlockPos)) {
+            StevesArmyMod.LOGGER.info("[VS2] seatSoldierDirect: seat {} occupied — refusing duplicate mount", seatBlockPos);
+            return false;
+        }
         try {
             // Resolve the ship at the seat position for logging
             Object ship = null;
@@ -1174,6 +1250,207 @@ public final class VS2Compat {
     }
 
     /**
+     * Result of classifying a player's right-click on a seat block. Ship blocks are
+     * interacted with in shipyard space, and Create's SeatBlock.use scans that space
+     * for seat entities — so a seat entity from ANOTHER ship sharing the clicked
+     * shipyard position hijacks the click and Create ejects its occupant. The
+     * classification separates the ship's own seats from foreign ones so the click
+     * can be re-routed to the seat the player actually aimed at.
+     */
+    public static final class PlayerSeatClick {
+        private final BlockPos seatPos;
+        @Nullable private final Entity freeSeat;
+        @Nullable private final Entity playerOccupant;
+        @Nullable private final Entity soldierOccupant;
+        private final boolean foreignSeatPresent;
+
+        private PlayerSeatClick(BlockPos seatPos, @Nullable Entity freeSeat,
+                                @Nullable Entity playerOccupant, @Nullable Entity soldierOccupant,
+                                boolean foreignSeatPresent) {
+            this.seatPos = seatPos;
+            this.freeSeat = freeSeat;
+            this.playerOccupant = playerOccupant;
+            this.soldierOccupant = soldierOccupant;
+            this.foreignSeatPresent = foreignSeatPresent;
+        }
+
+        /** The clicked seat block, in shipyard space. */
+        public BlockPos seatPos() {
+            return seatPos;
+        }
+
+        /** A same-ship seat entity at the clicked block with no passenger, or null. */
+        @Nullable
+        public Entity freeSeat() {
+            return freeSeat;
+        }
+
+        /** A same-ship seat entity at the clicked block already carrying a player, or null. */
+        @Nullable
+        public Entity playerOccupant() {
+            return playerOccupant;
+        }
+
+        /** A same-ship seat entity at the clicked block carrying an alive soldier, or null. */
+        @Nullable
+        public Entity soldierOccupant() {
+            return soldierOccupant;
+        }
+
+        /** True when a seat entity of another ship shares the clicked shipyard position. */
+        public boolean foreignSeatPresent() {
+            return foreignSeatPresent;
+        }
+    }
+
+    /**
+     * Classifies a player click on the seat block at {@code pos} (shipyard space, as
+     * Forge delivers interaction positions for ship blocks). Returns null when the
+     * block is not a Create SeatBlock on a ship — the click is then none of our
+     * business and Create handles it natively. Safe on both sides.
+     */
+    @Nullable
+    public static PlayerSeatClick classifyPlayerSeatClick(Level level, BlockPos pos) {
+        initialize();
+        if (!available || createSeatBlockClass == null) {
+            return null;
+        }
+        if (!createSeatBlockClass.isInstance(level.getBlockState(pos).getBlock())) {
+            return null;
+        }
+        Object ship = getShipObjectAtBlockPos(level, pos);
+        Long shipId = getShipIdOf(ship);
+        if (ship == null || shipId == null) {
+            return null;
+        }
+
+        Vec3 seatWorld = null;
+        try {
+            Object converted = reflect(toWorldCoordinates, ship,
+                pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
+            if (converted instanceof org.joml.Vector3dc v) {
+                seatWorld = new Vec3(v.x(), v.y(), v.z());
+            }
+        } catch (ReflectiveOperationException ignored) {
+        }
+
+        Entity freeSeat = null;
+        Entity playerOccupant = null;
+        Entity soldierOccupant = null;
+        boolean foreignSeatPresent = false;
+        for (Entity seat : scanSeatEntities(level, pos)) {
+            Long seatShipId = getShipIdOf(getShipUnder(seat));
+            boolean sameShip;
+            if (seatShipId != null) {
+                sameShip = seatShipId.equals(shipId);
+            } else if (seatWorld != null) {
+                // Ship lookup misses for stale/persistent seat entities; attribute by
+                // where the seat actually renders in the world instead.
+                Vec3 rendered = getSeatWorldPosition(seat);
+                sameShip = rendered != null
+                    && rendered.distanceToSqr(seatWorld) <= SEAT_CLICK_WORLD_TOLERANCE_SQR;
+            } else {
+                sameShip = false;
+            }
+            if (!sameShip) {
+                foreignSeatPresent = true;
+                continue;
+            }
+            Entity occupant = firstAlivePassenger(seat);
+            if (occupant instanceof SoldierEntity) {
+                if (soldierOccupant == null) {
+                    soldierOccupant = seat;
+                }
+            } else if (occupant instanceof Player) {
+                if (playerOccupant == null) {
+                    playerOccupant = seat;
+                }
+            } else if (freeSeat == null) {
+                freeSeat = seat;
+            }
+        }
+        return new PlayerSeatClick(pos.immutable(), freeSeat, playerOccupant, soldierOccupant,
+            foreignSeatPresent);
+    }
+
+    /** Create seat entities inside the block's AABB — the same scan SeatBlock.use performs. */
+    @SuppressWarnings("unchecked")
+    private static List<Entity> scanSeatEntities(Level level, BlockPos pos) {
+        if (createSeatEntityClass == null) {
+            return List.of();
+        }
+        return (List<Entity>) level.getEntitiesOfClass(
+            (Class<? extends Entity>) createSeatEntityClass, new AABB(pos));
+    }
+
+    @Nullable
+    private static Entity firstAlivePassenger(Entity entity) {
+        for (Entity passenger : entity.getPassengers()) {
+            if (passenger != null && passenger.isAlive()) {
+                return passenger;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Seats a player on an existing seat entity. Player mounts pass through
+     * SoldierMountHandler un-gated, so no authorization is needed. Returns true
+     * when the player is now a passenger of {@code seat}.
+     */
+    public static boolean seatPlayerOnSeatEntity(ServerLevel level, ServerPlayer player, Entity seat) {
+        initialize();
+        if (!available || player.isPassenger() || seat.isRemoved()
+            || !isCreateSeatEntity(seat) || !seat.getPassengers().isEmpty()) {
+            return false;
+        }
+        player.startRiding(seat, true);
+        if (!player.isPassenger() || player.getVehicle() != seat) {
+            return false;
+        }
+        syncPlayerSeatMount(level, player, seat, getSeatWorldPosition(seat));
+        return true;
+    }
+
+    /**
+     * Seats a player on the static SeatBlock at the shipyard position by creating a
+     * fresh seat entity there — the same {@code SeatBlock.sitDown} call Create's use()
+     * makes. Occupancy is judged per ship: a seat entity from ANOTHER ship sharing
+     * the shipyard position must not block the clicked seat, but a taken seat on the
+     * same ship refuses the mount. Returns true when the player is mounted.
+     */
+    public static boolean sitPlayerAtShipyardSeat(ServerLevel level, ServerPlayer player, BlockPos seatPos) {
+        initialize();
+        if (!available || createSeatSitDown == null || createSeatBlockClass == null || player.isPassenger()) {
+            return false;
+        }
+        if (!createSeatBlockClass.isInstance(level.getBlockState(seatPos).getBlock())) {
+            return false;
+        }
+        Long shipId = getShipIdAt(level, seatPos.getX() + 0.5, seatPos.getY() + 0.5, seatPos.getZ() + 0.5);
+        for (Entity seat : scanSeatEntities(level, seatPos)) {
+            Long seatShipId = getShipIdOf(getShipUnder(seat));
+            // Unattributable entities count as same-ship here: refuse the mount rather
+            // than risk double-booking one seat.
+            boolean sameShip = shipId == null || seatShipId == null || seatShipId.equals(shipId);
+            if (sameShip && !seat.getPassengers().isEmpty()) {
+                return false;
+            }
+        }
+        try {
+            createSeatSitDown.invoke(null, level, seatPos, player);
+        } catch (ReflectiveOperationException exception) {
+            logReflectionFailure(exception);
+            return false;
+        }
+        if (!player.isPassenger()) {
+            return false;
+        }
+        syncPlayerSeatMount(level, player, player.getVehicle(), Vec3.atCenterOf(seatPos));
+        return true;
+    }
+
+    /**
      * syncTransportState equivalent for a player takeover: shipyard anchors are
      * not vanilla-tracked, so the mounting player and everyone near the seat
      * need the anchor's add-entity packet before the passenger packet.
@@ -1183,7 +1460,13 @@ public final class VS2Compat {
         if (anchor == null) {
             return;
         }
-        Vec3 refPos = capture.worldPos();
+        syncPlayerSeatMount(level, player, anchor, capture.worldPos());
+    }
+
+    private static void syncPlayerSeatMount(ServerLevel level, ServerPlayer player, Entity anchor, Vec3 refPos) {
+        if (anchor == null) {
+            return;
+        }
         java.util.Set<ServerPlayer> recipients = new java.util.HashSet<>();
         recipients.add(player);
         for (ServerPlayer other : level.getServer().getPlayerList().getPlayers()) {
@@ -1197,7 +1480,7 @@ public final class VS2Compat {
             recipient.connection.send(spawnPacket);
             recipient.connection.send(passengersPacket);
         }
-        StevesArmyMod.LOGGER.info("[Respawn] Synced seat takeover mount player={} anchor={} recipients={}",
+        StevesArmyMod.LOGGER.info("[VS2] Synced player seat mount player={} anchor={} recipients={}",
             player.getName().getString(), anchor.getId(), recipients.size());
     }
 
@@ -1220,6 +1503,14 @@ public final class VS2Compat {
      * Returns true if the soldier was mounted.
      */
     public static boolean releaseTransport(SoldierEntity soldier) {
+        return releaseTransport(soldier, true);
+    }
+
+    /**
+     * Release with control over the handle exit. Mount-time cleanup passes false -
+     * the soldier is about to be seated again and must not teleport to the hatch.
+     */
+    public static boolean releaseTransport(SoldierEntity soldier, boolean exitAtHandle) {
         Entity vehicle = soldier.isPassenger() ? soldier.getVehicle() : null;
         if (soldier.isPassenger()) {
             soldier.stopRiding();
@@ -1227,6 +1518,14 @@ public final class VS2Compat {
         clearShipDraggingStateDirect(soldier);
         clearTransportState(soldier);
         blockAutoTransport(soldier);
+        // Exit at the hatch: the handle linked to this soldier's seat first, then the
+        // nearest handle on their ship. The resolver runs after stopRiding so the
+        // teleport lands as the final position, but the mount-time handle record
+        // still resolves (it does not need the seat entity).
+        if (exitAtHandle && vehicle != null && StevesArmyConfig.VEHICLE_HANDLES_ENABLED.get()
+            && soldier.level() instanceof ServerLevel serverLevel) {
+            AnalogWarfareCompat.exitAtNearestHandle(soldier);
+        }
         if (vehicle != null) {
             // Send empty passenger list so the anchor no longer reports the soldier.
             syncTransportState(soldier, vehicle, false);
@@ -1274,6 +1573,36 @@ public final class VS2Compat {
             return mounted;
         }
         return getShipAt(entity.level(), entity.blockPosition());
+    }
+
+    /**
+     * Ship carrying the given entity, for occupancy checks. Seated riders and
+     * shipyard-space entities resolve through {@link #getShipUnder}; a world-space
+     * entity standing aboard (crew on an open deck) resolves through the
+     * ships-intersecting query, accepting only a ship whose real voxel hull overlaps
+     * the entity — ground beside the hull does not count.
+     */
+    @Nullable
+    public static Object resolveShipUnderEntity(Entity entity) {
+        Object ship = getShipUnder(entity);
+        if (ship != null || !isEnabled()
+            || !(entity.level() instanceof ServerLevel serverLevel)) {
+            return ship;
+        }
+        try {
+            Object ships = reflect(getShipsIntersecting, entity.level(), entity.getBoundingBox());
+            if (ships instanceof Iterable<?> iterable) {
+                for (Object candidate : iterable) {
+                    if (candidate != null
+                        && shipOverlapsHull(serverLevel, candidate, entity.getBoundingBox(), true)) {
+                        return candidate;
+                    }
+                }
+            }
+        } catch (ReflectiveOperationException exception) {
+            logReflectionFailure(exception);
+        }
+        return null;
     }
 
     /**
@@ -1572,7 +1901,7 @@ public final class VS2Compat {
         double w = mob.getBbWidth() * 0.5 + 0.1;
         double h = mob.getBbHeight() * 0.5 + 0.1;
         AABB bounds = new AABB(node).inflate(w, h, w);
-        return intersectsShip(level, bounds);
+        return intersectsShipHull(level, bounds, false);
     }
 
     public static boolean shouldRejectNavigation(Level level, BlockPos position) {
@@ -1580,7 +1909,7 @@ public final class VS2Compat {
             return false;
         }
         AABB bounds = new AABB(position).inflate(0.35D, 0.1D, 0.35D);
-        return intersectsShip(level, bounds);
+        return intersectsShipHull(level, bounds, false);
     }
 
     public static boolean shouldRejectNavigation(Entity entity) {
@@ -1727,6 +2056,20 @@ public final class VS2Compat {
     }
 
     /**
+     * Unclassified variant for callers that combine the result with their own
+     * world block walk (VisibilityRay): skips the vanilla clip that rejects a
+     * ship hit sitting behind a closer world block. The caller's min() against
+     * its own obstruction makes the distinction immaterial, and the saved world
+     * clip is the second-most expensive part of the legacy path.
+     */
+    public static double getShipAwareBlockHitDistance(Level level, Vec3 from, Vec3 to,
+                                                       @Nullable Entity source,
+                                                       boolean classifyAgainstWorld) {
+        Vec3 hit = getShipAwareBlockHitLocation(level, from, to, source, classifyAgainstWorld);
+        return hit == null ? Double.POSITIVE_INFINITY : from.distanceTo(hit);
+    }
+
+    /**
      * World-space location of the nearest ship-aware block hit along the ray, or null.
      * Used by the crew stick/egg to anchor on the ship the player is aiming at — the
      * soldier-flow way (ship + anchor position, never via a seat entity: empty Create
@@ -1735,6 +2078,19 @@ public final class VS2Compat {
     @Nullable
     public static Vec3 getShipAwareBlockHitLocation(Level level, Vec3 from, Vec3 to,
                                                     @Nullable Entity source) {
+        return getShipAwareBlockHitLocation(level, from, to, source, true);
+    }
+
+    /**
+     * World-space location of the nearest ship-aware block hit along the ray, or null.
+     * When {@code classifyAgainstWorld} is set, a hit only counts if no world block
+     * lies in front of it (the legacy whole-ray contract); otherwise the caller
+     * merges the result with its own world obstruction.
+     */
+    @Nullable
+    public static Vec3 getShipAwareBlockHitLocation(Level level, Vec3 from, Vec3 to,
+                                                    @Nullable Entity source,
+                                                    boolean classifyAgainstWorld) {
         if (!isEnabled()) {
             return null;
         }
@@ -1747,35 +2103,254 @@ public final class VS2Compat {
         }
 
         try {
-            ClipContext context = new ClipContext(
-                from,
-                to,
-                ClipContext.Block.COLLIDER,
-                ClipContext.Fluid.NONE,
-                source
-            );
-            BlockHitResult hit;
-            if (clipIncludeShipsOnly != null) {
-                hit = (BlockHitResult) reflect(clipIncludeShipsOnly, level, context, true, null, true);
-            } else {
-                hit = (BlockHitResult) reflect(clipIncludeShips, level, context);
-                BlockHitResult vanillaHit = (BlockHitResult) reflect(vanillaClip, level, context);
-                if (hit.getType() != HitResult.Type.BLOCK
-                    || (vanillaHit.getType() == HitResult.Type.BLOCK
-                        && hit.getLocation().distanceToSqr(from)
-                            >= vanillaHit.getLocation().distanceToSqr(from))) {
-                    return null;
-                }
+            if (!StevesArmyConfig.VS2_SHIP_RAYCAST_GATE.get()) {
+                return wholeRayShipHit(level, from, to, source);
             }
-            if (hit.getType() != HitResult.Type.BLOCK) {
+
+            // Gate: with no ship in the ray's bounding box the clip can only ever
+            // reproduce the world result, which VisibilityRay already walks
+            // block-by-block itself. Cover scoring traces hundreds of rays per
+            // search, and on VS 2.3 every full clip also re-clips the whole world
+            // plus every ship in the query box, so skipping it here is the bulk of
+            // the saving.
+            List<Object> ships = shipsIntersectingRay(level, from, to);
+            if (ships.isEmpty()) {
                 return null;
             }
 
-            return hit.getLocation();
+            Vec3 best = null;
+            double bestDistSqr = Double.MAX_VALUE;
+            for (Object ship : ships) {
+                AABB worldBox = shipWorldAABB(level, ship);
+                if (worldBox == null) {
+                    // No voxel AABB or transform helpers: fall back to the legacy
+                    // whole-ray clip rather than guessing a span.
+                    return wholeRayShipHit(level, from, to, source);
+                }
+                double[] span = segmentSpanInBox(from, to, worldBox);
+                if (span == null) {
+                    // The hull lives inside its AABB, so a segment missing the
+                    // AABB cannot hit it — VS2's own per-ship check would skip it.
+                    continue;
+                }
+                // Pad both ends so the sub-segment keeps margin around the AABB
+                // pass-through and absorbs sub-block ship movement since the box
+                // snapshot.
+                double length = from.distanceTo(to);
+                double padT = length > 1.0E-4D ? Math.min(SHIP_SPAN_PAD_BLOCKS / length, 0.5D) : 0.0D;
+                Vec3 hit = shipHitOnSegment(level, from, to,
+                    Math.max(0.0D, span[0] - padT), Math.min(1.0D, span[1] + padT), source);
+                if (hit != null) {
+                    double distSqr = from.distanceToSqr(hit);
+                    if (distSqr < bestDistSqr) {
+                        bestDistSqr = distSqr;
+                        best = hit;
+                    }
+                }
+            }
+            if (best != null && classifyAgainstWorld && vanillaClip != null) {
+                // VS 2.3 legacy contract: a world block level with or in front of
+                // the ship hit means the obstruction is terrain, not hull. On the
+                // VS 2.4 skipWorld path the clip is ship-only by construction and
+                // the legacy code never classified it.
+                BlockHitResult vanillaHit = (BlockHitResult) reflect(vanillaClip, level,
+                    new ClipContext(from, best,
+                        ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, source));
+                if (vanillaHit.getType() == HitResult.Type.BLOCK
+                    && vanillaHit.getLocation().distanceToSqr(from) <= bestDistSqr) {
+                    return null;
+                }
+            }
+            return best;
         } catch (ReflectiveOperationException | RuntimeException exception) {
             logReflectionFailure(exception);
             return null;
         }
+    }
+
+    /** Padding in blocks applied to each end of a ship-clipped sub-segment. */
+    private static final double SHIP_SPAN_PAD_BLOCKS = 1.0D;
+    /** Per-tick world-envelope cache: ships move slowly, rays are many. */
+    private static final Map<Long, AABB> SHIP_WORLD_BOX_CACHE = new HashMap<>();
+    private static long shipWorldBoxCacheTick = Long.MIN_VALUE;
+
+    /** Ships returned by the level's ship index for the ray's bounding box. */
+    private static List<Object> shipsIntersectingRay(Level level, Vec3 from, Vec3 to)
+            throws ReflectiveOperationException {
+        List<Object> ships = new ArrayList<>();
+        Object result = reflect(getShipsIntersecting, level, new AABB(from, to));
+        if (result instanceof Iterable<?> iterable) {
+            for (Object ship : iterable) {
+                ships.add(ship);
+            }
+        }
+        return ships;
+    }
+
+    /**
+     * World-space axis-aligned envelope of the ship's voxel hull: the shipyard
+     * voxel box's eight corners transformed by shipToWorld. Conservative after
+     * yaw (the envelope can exceed the hull), which is safe — a span test
+     * against it only ever widens the clipped segment.
+     */
+    @Nullable
+    private static AABB shipWorldAABB(Level level, Object ship) {
+        Long shipId = getShipIdOf(ship);
+        if (shipId == null) {
+            return null;
+        }
+        long tick = level.getGameTime();
+        synchronized (SHIP_WORLD_BOX_CACHE) {
+            if (shipWorldBoxCacheTick != tick) {
+                SHIP_WORLD_BOX_CACHE.clear();
+                shipWorldBoxCacheTick = tick;
+            }
+            AABB cached = SHIP_WORLD_BOX_CACHE.get(shipId);
+            if (cached != null) {
+                return cached;
+            }
+        }
+        BlockPos shipyardMin = getShipyardMin(ship);
+        BlockPos shipyardMax = getShipyardMax(ship);
+        if (shipyardMin == null || shipyardMax == null) {
+            return null;
+        }
+        double minX = Double.POSITIVE_INFINITY;
+        double minY = Double.POSITIVE_INFINITY;
+        double minZ = Double.POSITIVE_INFINITY;
+        double maxX = Double.NEGATIVE_INFINITY;
+        double maxY = Double.NEGATIVE_INFINITY;
+        double maxZ = Double.NEGATIVE_INFINITY;
+        for (int cx = 0; cx <= 1; cx++) {
+            for (int cy = 0; cy <= 1; cy++) {
+                for (int cz = 0; cz <= 1; cz++) {
+                    Vec3 corner = shipToWorldPosition(ship, new Vec3(
+                        cx == 0 ? shipyardMin.getX() : shipyardMax.getX() + 1,
+                        cy == 0 ? shipyardMin.getY() : shipyardMax.getY() + 1,
+                        cz == 0 ? shipyardMin.getZ() : shipyardMax.getZ() + 1));
+                    if (corner == null) {
+                        return null;
+                    }
+                    minX = Math.min(minX, corner.x);
+                    maxX = Math.max(maxX, corner.x);
+                    minY = Math.min(minY, corner.y);
+                    maxY = Math.max(maxY, corner.y);
+                    minZ = Math.min(minZ, corner.z);
+                    maxZ = Math.max(maxZ, corner.z);
+                }
+            }
+        }
+        AABB box = new AABB(minX, minY, minZ, maxX, maxY, maxZ);
+        synchronized (SHIP_WORLD_BOX_CACHE) {
+            if (SHIP_WORLD_BOX_CACHE.size() > 256) {
+                SHIP_WORLD_BOX_CACHE.clear();
+            }
+            SHIP_WORLD_BOX_CACHE.put(shipId, box);
+        }
+        return box;
+    }
+
+    /**
+     * Entry/exit parameters of the from..to segment through {@code box}, or null
+     * when the segment misses it. Standard slab clip in segment space [0,1].
+     */
+    @Nullable
+    private static double[] segmentSpanInBox(Vec3 from, Vec3 to, AABB box) {
+        double[] span = {0.0D, 1.0D};
+        if (!clipSpanAxis(from.x, to.x - from.x, box.minX, box.maxX, span)
+            || !clipSpanAxis(from.y, to.y - from.y, box.minY, box.maxY, span)
+            || !clipSpanAxis(from.z, to.z - from.z, box.minZ, box.maxZ, span)) {
+            return null;
+        }
+        return span;
+    }
+
+    private static boolean clipSpanAxis(double origin, double delta, double min, double max,
+                                        double[] span) {
+        if (Math.abs(delta) < 1.0E-9D) {
+            return origin >= min && origin <= max;
+        }
+        double inv = 1.0D / delta;
+        double enter = (min - origin) * inv;
+        double exit = (max - origin) * inv;
+        if (enter > exit) {
+            double swap = enter;
+            enter = exit;
+            exit = swap;
+        }
+        span[0] = Math.max(span[0], enter);
+        span[1] = Math.min(span[1], exit);
+        return span[0] <= span[1];
+    }
+
+    /**
+     * Ship-only obstruction on the sub-segment from..to scaled to [t0,t1]. The
+     * VS 2.4 path asks clipIncludeShips to skip the world entirely; on VS 2.3 the
+     * combined clip also contains world blocks, so a hit only counts when it is
+     * closer than a vanilla clip of the same sub-segment — the legacy whole-ray
+     * classification, just over a much shorter walk. Any world block closer than
+     * a ship hit is harmless anyway: VisibilityRay takes the minimum against its
+     * own block walk.
+     */
+    @Nullable
+    private static Vec3 shipHitOnSegment(Level level, Vec3 from, Vec3 to, double t0, double t1,
+                                         @Nullable Entity source)
+            throws ReflectiveOperationException {
+        Vec3 start = lerp(from, to, t0);
+        Vec3 end = lerp(from, to, t1);
+        ClipContext context = new ClipContext(start, end,
+            ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, source);
+        BlockHitResult hit;
+        if (clipIncludeShipsOnly != null) {
+            hit = (BlockHitResult) reflect(clipIncludeShipsOnly, level, context, true, null, true);
+        } else {
+            hit = (BlockHitResult) reflect(clipIncludeShips, level, context);
+            BlockHitResult vanillaHit = (BlockHitResult) reflect(vanillaClip, level, context);
+            if (hit.getType() == HitResult.Type.BLOCK
+                && vanillaHit.getType() == HitResult.Type.BLOCK
+                && hit.getLocation().distanceToSqr(start)
+                    >= vanillaHit.getLocation().distanceToSqr(start)) {
+                return null;
+            }
+        }
+        return hit.getType() == HitResult.Type.BLOCK ? hit.getLocation() : null;
+    }
+
+    /** Legacy whole-ray path: one combined clip plus a vanilla clip for classification. */
+    @Nullable
+    private static Vec3 wholeRayShipHit(Level level, Vec3 from, Vec3 to, @Nullable Entity source)
+            throws ReflectiveOperationException {
+        ClipContext context = new ClipContext(
+            from,
+            to,
+            ClipContext.Block.COLLIDER,
+            ClipContext.Fluid.NONE,
+            source
+        );
+        BlockHitResult hit;
+        if (clipIncludeShipsOnly != null) {
+            hit = (BlockHitResult) reflect(clipIncludeShipsOnly, level, context, true, null, true);
+        } else {
+            hit = (BlockHitResult) reflect(clipIncludeShips, level, context);
+            BlockHitResult vanillaHit = (BlockHitResult) reflect(vanillaClip, level, context);
+            if (hit.getType() != HitResult.Type.BLOCK
+                || (vanillaHit.getType() == HitResult.Type.BLOCK
+                    && hit.getLocation().distanceToSqr(from)
+                        >= vanillaHit.getLocation().distanceToSqr(from))) {
+                return null;
+            }
+        }
+        if (hit.getType() != HitResult.Type.BLOCK) {
+            return null;
+        }
+
+        return hit.getLocation();
+    }
+
+    private static Vec3 lerp(Vec3 from, Vec3 to, double t) {
+        return new Vec3(from.x + (to.x - from.x) * t,
+                        from.y + (to.y - from.y) * t,
+                        from.z + (to.z - from.z) * t);
     }
 
     private static void syncTransportState(SoldierEntity soldier, Entity anchor, boolean mounted) {
@@ -1819,17 +2394,115 @@ public final class VS2Compat {
     }
 
     private static boolean isInsideShip(Entity entity) {
-        return intersectsShip(entity.level(), entity.getBoundingBox());
+        return intersectsShipHull(entity.level(), entity.getBoundingBox(), true);
     }
 
-    private static boolean intersectsShip(Level level, AABB bounds) {
+    /**
+     * True when {@code bounds} actually overlaps a ship's transformed voxel hull —
+     * NOT the ship's world-space axis-aligned envelope. The envelope balloons when
+     * a craft is yawed (45° turns wrap a hull several times its size in void), and
+     * avoidance keyed on it made soldiers refuse to path anywhere near a rotated
+     * ship, or stranded them after a dismount (their own node read as "blocked").
+     * The envelope query survives only as the cheap pre-filter; every candidate
+     * ship is then checked in ship space with the same geometric pattern
+     * {@link #resolveShipAtWorldAnchor} uses for multi-ship picks.
+     *
+     * @param includeNeighbourBlocks when true, a point in a block adjacent to a hull
+     *        block also counts as inside — the conservative read used by extraction,
+     *        which must notice soldiers standing ON the deck (their feet block is
+     *        air, the deck below is hull). Pathfinding passes false: counting
+     *        neighbours blocks every node within ~1 block of the hull and strands
+     *        soldiers standing right next to it (no path can start from a blocked
+     *        node), and the callers' own box inflation already provides clearance.
+     */
+    public static boolean intersectsShipHull(Level level, AABB bounds, boolean includeNeighbourBlocks) {
+        if (!isEnabled()) {
+            return false;
+        }
+        Object ships;
         try {
-            Object ships = reflect(getShipsIntersecting, level, bounds);
-            return ships instanceof Iterable<?> iterable && iterable.iterator().hasNext();
+            ships = reflect(getShipsIntersecting, level, bounds);
         } catch (ReflectiveOperationException exception) {
             logReflectionFailure(exception);
             return false;
         }
+        if (!(ships instanceof Iterable<?> iterable)) {
+            return false;
+        }
+        ServerLevel serverLevel = level instanceof ServerLevel server ? server : null;
+        for (Object ship : iterable) {
+            if (ship == null) {
+                continue;
+            }
+            if (shipOverlapsHull(serverLevel, ship, bounds, includeNeighbourBlocks)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Center + 8 corners: small caller-inflated boxes are fully covered by these. */
+    private static boolean shipOverlapsHull(@Nullable ServerLevel level, Object ship, AABB bounds,
+                                            boolean includeNeighbourBlocks) {
+        if (sampleInShipHull(level, ship, bounds.getCenter(), includeNeighbourBlocks)) {
+            return true;
+        }
+        double[] xs = {bounds.minX, bounds.maxX};
+        double[] ys = {bounds.minY, bounds.maxY};
+        double[] zs = {bounds.minZ, bounds.maxZ};
+        for (double x : xs) {
+            for (double y : ys) {
+                for (double z : zs) {
+                    if (sampleInShipHull(level, ship, new Vec3(x, y, z), includeNeighbourBlocks)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * One hull test: the point is "inside the ship" when its ship-local position
+     * lies within the ship's voxel AABB and the shipyard block there is solid
+     * (optionally counting face neighbours). Unloaded chunks and unavailable
+     * transforms/AABBs fail closed — avoidance must never open a hole into
+     * unloaded shipyard space.
+     */
+    private static boolean sampleInShipHull(@Nullable ServerLevel level, Object ship, Vec3 worldPoint,
+                                            boolean includeNeighbourBlocks) {
+        Vec3 local = worldToShipLocal(ship, worldPoint);
+        BlockPos aabbMin = local == null ? null : getShipyardMin(ship);
+        BlockPos aabbMax = local == null ? null : getShipyardMax(ship);
+        if (local == null || aabbMin == null || aabbMax == null) {
+            return true;
+        }
+        BlockPos converted = BlockPos.containing(local.x, local.y, local.z);
+        boolean contained = converted.getX() >= aabbMin.getX() - 1 && converted.getX() <= aabbMax.getX() + 1
+            && converted.getY() >= aabbMin.getY() - 1 && converted.getY() <= aabbMax.getY() + 1
+            && converted.getZ() >= aabbMin.getZ() - 1 && converted.getZ() <= aabbMax.getZ() + 1;
+        if (!contained) {
+            return false;
+        }
+        if (level == null) {
+            // No block access: treat the whole voxel box as hull (conservative).
+            return true;
+        }
+        if (!isChunkLoaded(level, converted)) {
+            return true;
+        }
+        if (!level.getBlockState(converted).isAir()) {
+            return true;
+        }
+        if (!includeNeighbourBlocks) {
+            return false;
+        }
+        for (Direction direction : Direction.values()) {
+            if (!level.getBlockState(converted.relative(direction)).isAir()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean isBeingDraggedByShip(Entity entity) {
@@ -2281,6 +2954,16 @@ public final class VS2Compat {
      * extracted and its AI may run again.
      */
     private static boolean waitForReseat(SoldierEntity soldier, SoldierState state) {
+        // Plain-entity anchor (Superb Warfare mount: ship id and seat position are
+        // both null). There is no ship to re-seat on, so a lost vanilla passenger
+        // link — the vehicle was destroyed, or the rider was evicted — ends the
+        // mount immediately instead of pinning the soldier for the wait timeout.
+        if (state.transportShipId == null && state.transportSeatPosition == null) {
+            StevesArmyMod.LOGGER.info("[VS2] Vehicle anchor lost soldier={} vehicle={} - releasing",
+                soldier.getId(), state.transportAnchorId);
+            releaseAndClear(soldier, state);
+            return false;
+        }
         boolean firstDetection = state.reseatWaitTicks == 0;
         state.reseatWaitTicks++;
         Level level = soldier.level();
@@ -2409,10 +3092,10 @@ public final class VS2Compat {
             soldier.getId(), formatVec3(preDismountPos), formatVec3(postReleasePos),
             String.format("%.2f", preDismountPos.distanceTo(postReleasePos)));
         clearTransportState(state);
-        // Automatic releases (owner left the ship, lost anchor) also exit at the hatch
-        // when the vehicle is parked nearby.
+        // Automatic releases (owner left the ship, lost anchor) also exit at the
+        // hatch: linked handle first, then the nearest handle on the ship.
         if (StevesArmyConfig.VEHICLE_HANDLES_ENABLED.get()) {
-            AnalogWarfareCompat.exitAtRememberedHandle(soldier);
+            AnalogWarfareCompat.exitAtNearestHandle(soldier);
         }
     }
 
@@ -2546,6 +3229,9 @@ public final class VS2Compat {
         return null;
     }
 
+    /** Head clearance a dismount spot must have above it: no hull blocks overhead. */
+    private static final double EXTRACTION_HEAD_CLEARANCE = 2.0;
+
     private static boolean isSafeWorldPosition(SoldierEntity soldier, BlockPos position) {
         BlockState floor = soldier.level().getBlockState(position.below());
         if (floor.getCollisionShape(soldier.level(), position.below()).isEmpty()) {
@@ -2553,7 +3239,12 @@ public final class VS2Compat {
         }
         Vec3 location = Vec3.atBottomCenterOf(position);
         AABB bounds = soldier.getDimensions(Pose.STANDING).makeBoundingBox(location);
-        return !intersectsShip(soldier.level(), bounds) && soldier.level().noCollision(soldier, bounds);
+        // Ship blocks don't register in the world heightmap, so without the
+        // upward extension the extraction spiral happily accepts the seabed
+        // directly under the keel. Require open space overhead too.
+        AABB clearance = bounds.expandTowards(0.0, EXTRACTION_HEAD_CLEARANCE, 0.0);
+        return !intersectsShipHull(soldier.level(), clearance, true)
+            && soldier.level().noCollision(soldier, bounds);
     }
 
     private static void moveToWorldPosition(SoldierEntity soldier, BlockPos position) {

@@ -17,6 +17,11 @@ import java.util.stream.Collectors;
 
 public class SquadThreatIntel {
 
+    /** Enemy vehicle classes (War Thunder-style marker tiers). */
+    public static final int VC_VEHICLE = 0;
+    public static final int VC_HULL_MG = 1;
+    public static final int VC_TANK = 2;
+
     private final Map<UUID, ThreatKnowledge> knownThreats = new HashMap<>();
     private static final long THREAT_MEMORY_TICKS = 600;
     private static final long STALE_TIMEOUT_TICKS = 120;
@@ -35,6 +40,18 @@ public class SquadThreatIntel {
         public final Map<UUID, Long> suppressionHeartbeats = new HashMap<>();
         @Nullable public Vec3 lastVisibleAimPoint;
         @Nullable public Vec3 lastVisibleHeadPoint;
+        /** Armored-vehicle threat: small arms cannot destroy it; reactions are role-based. */
+        public boolean isHardTarget;
+        /** World-space blocks per tick at last sighting (armor threats only). */
+        @Nullable public Vec3 lastKnownVelocity;
+        /**
+         * World-space hull silhouette corners (ship-space AABB corners transformed
+         * to world at last sighting), so line-of-sight can be tested against any
+         * part of the vehicle instead of only the gun position.
+         */
+        @Nullable public Vec3[] lastKnownHullCorners;
+        /** Vehicle classification: {@link SquadThreatIntel#VC_VEHICLE}..{@link SquadThreatIntel#VC_TANK}. */
+        public int vehicleClass = VC_VEHICLE;
 
         public ThreatKnowledge(UUID threatEntityId) {
             this.threatEntityId = threatEntityId;
@@ -59,6 +76,24 @@ public class SquadThreatIntel {
             tag.putFloat("Accuracy", accuracy);
             tag.putBoolean("IsAlive", isAlive);
             tag.putBoolean("IsSuppressed", isSuppressed);
+            tag.putBoolean("IsHardTarget", isHardTarget);
+            tag.putInt("VehicleClass", vehicleClass);
+            if (lastKnownVelocity != null) {
+                tag.putDouble("VelX", lastKnownVelocity.x);
+                tag.putDouble("VelY", lastKnownVelocity.y);
+                tag.putDouble("VelZ", lastKnownVelocity.z);
+            }
+            if (lastKnownHullCorners != null) {
+                ListTag cornerList = new ListTag();
+                for (Vec3 corner : lastKnownHullCorners) {
+                    CompoundTag cornerTag = new CompoundTag();
+                    cornerTag.putDouble("X", corner.x);
+                    cornerTag.putDouble("Y", corner.y);
+                    cornerTag.putDouble("Z", corner.z);
+                    cornerList.add(cornerTag);
+                }
+                tag.put("HullCorners", cornerList);
+            }
             if (suppressedBy != null) {
                 tag.putUUID("SuppressedBy", suppressedBy);
             }
@@ -100,6 +135,24 @@ public class SquadThreatIntel {
             knowledge.accuracy = tag.getFloat("Accuracy");
             knowledge.isAlive = tag.getBoolean("IsAlive");
             knowledge.isSuppressed = tag.getBoolean("IsSuppressed");
+            knowledge.isHardTarget = tag.getBoolean("IsHardTarget");
+            knowledge.vehicleClass = tag.getInt("VehicleClass");
+            if (tag.contains("VelX")) {
+                knowledge.lastKnownVelocity = new Vec3(
+                    tag.getDouble("VelX"), tag.getDouble("VelY"), tag.getDouble("VelZ"));
+            }
+            if (tag.contains("HullCorners")) {
+                ListTag cornerList = tag.getList("HullCorners", Tag.TAG_COMPOUND);
+                if (!cornerList.isEmpty()) {
+                    Vec3[] corners = new Vec3[cornerList.size()];
+                    for (int i = 0; i < cornerList.size(); i++) {
+                        CompoundTag cornerTag = cornerList.getCompound(i);
+                        corners[i] = new Vec3(cornerTag.getDouble("X"),
+                            cornerTag.getDouble("Y"), cornerTag.getDouble("Z"));
+                    }
+                    knowledge.lastKnownHullCorners = corners;
+                }
+            }
             if (tag.contains("SuppressedBy")) {
                 knowledge.suppressedBy = tag.getUUID("SuppressedBy");
             }
@@ -394,5 +447,64 @@ public class SquadThreatIntel {
         return (int) knownThreats.values().stream()
             .filter(t -> t.isAlive && t.isSuppressed)
             .count();
+    }
+
+    /**
+     * Publishes or refreshes an armored-vehicle sighting. Hard targets use the
+     * position-based threat store like soft targets; {@code aimPoint} is the
+     * vehicle's gun/optic position and {@code velocity} its world-space motion
+     * in blocks per tick, both used for cover scoring and path displacement.
+     * {@code hullCorners} carries the vehicle's world-space silhouette so firing
+     * solutions can accept line of sight to any part of the hull.
+     */
+    public void reportHardTarget(UUID reporterId, UUID threatId, BlockPos hullPos,
+                                 @Nullable Vec3 aimPoint, @Nullable Vec3 velocity,
+                                 @Nullable Vec3[] hullCorners, float accuracy, Level level) {
+        reportHardTarget(reporterId, threatId, hullPos, aimPoint, velocity, hullCorners,
+            accuracy, level, VC_HULL_MG);
+    }
+
+    /**
+     * Publishes or refreshes an enemy-vehicle sighting. {@code vehicleClass}
+     * merges upward (tank &gt; hull MG &gt; vehicle) so observers that saw only
+     * part of the vehicle still converge on the strongest known class.
+     */
+    public void reportHardTarget(UUID reporterId, UUID threatId, BlockPos hullPos,
+                                 @Nullable Vec3 aimPoint, @Nullable Vec3 velocity,
+                                 @Nullable Vec3[] hullCorners, float accuracy, Level level,
+                                 int vehicleClass) {
+        ThreatKnowledge knowledge = knownThreats.get(threatId);
+        if (knowledge != null && !knowledge.isAlive) {
+            return;
+        }
+        if (knowledge == null) {
+            knowledge = new ThreatKnowledge(threatId);
+        }
+        knowledge.lastKnownPosition = hullPos;
+        knowledge.lastSeenTime = level.getGameTime();
+        knowledge.lastSeenBySoldier = reporterId;
+        knowledge.lastVisibleAimPoint = aimPoint;
+        knowledge.lastKnownVelocity = velocity;
+        knowledge.lastKnownHullCorners = hullCorners;
+        knowledge.accuracy = Math.max(knowledge.accuracy, accuracy);
+        knowledge.isAlive = true;
+        knowledge.isHardTarget = true;
+        knowledge.vehicleClass = Math.max(knowledge.vehicleClass, vehicleClass);
+        knownThreats.put(threatId, knowledge);
+    }
+
+    /** Fresh (not stale) armored-vehicle threats known to the squad, nearest first. */
+    public List<ThreatKnowledge> getHardTargetThreats(long currentGameTime) {
+        return knownThreats.values().stream()
+            .filter(t -> t.isAlive && t.isHardTarget)
+            .filter(t -> currentGameTime - t.lastSeenTime <= STALE_TIMEOUT_TICKS)
+            .sorted(Comparator.comparingDouble(t -> -t.accuracy))
+            .collect(Collectors.toList());
+    }
+
+    public boolean isHardTarget(UUID threatId, long currentGameTime) {
+        ThreatKnowledge knowledge = knownThreats.get(threatId);
+        return knowledge != null && knowledge.isHardTarget
+            && currentGameTime - knowledge.lastSeenTime <= STALE_TIMEOUT_TICKS;
     }
 }

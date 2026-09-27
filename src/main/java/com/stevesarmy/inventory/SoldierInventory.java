@@ -20,7 +20,10 @@ public class SoldierInventory implements Container {
     public static final int ARMOR_CHEST = 1;
     public static final int ARMOR_LEGS = 2;
     public static final int ARMOR_FEET = 3;
-    public static final int SLOT_OFF_HAND = 4;
+    public static final int SLOT_SIDEARM = 4;
+    /** @deprecated Use SLOT_SIDEARM. Kept for save/menu source compatibility. */
+    @Deprecated
+    public static final int SLOT_OFF_HAND = SLOT_SIDEARM;
     public static final int SLOT_MAIN_HAND = 5;
     public static final int SLOT_GENERAL_START = 6;
 
@@ -31,6 +34,8 @@ public class SoldierInventory implements Container {
     private final NonNullList<ItemStack> items;
     @Nullable
     private Consumer<ItemStack> mainHandChangedCallback;
+    @Nullable
+    private Consumer<ItemStack> sidearmChangedCallback;
 
     public SoldierInventory() {
         this.items = NonNullList.withSize(INVENTORY_SIZE, ItemStack.EMPTY);
@@ -40,12 +45,23 @@ public class SoldierInventory implements Container {
         this.mainHandChangedCallback = callback;
     }
 
+    /** Fired whenever the sidearm slot's stack changes; drives the client-facing stowed-weapon sync. */
+    public void setSidearmChangedCallback(@Nullable Consumer<ItemStack> callback) {
+        this.sidearmChangedCallback = callback;
+    }
+
+    private void notifySidearmChanged() {
+        if (sidearmChangedCallback != null) {
+            sidearmChangedCallback.accept(items.get(SLOT_SIDEARM));
+        }
+    }
+
     public void syncArmorToEntity(SoldierEntity soldier) {
         for (int i = 0; i < 4; i++) {
             soldier.setItemSlot(ARMOR_SLOTS[i], items.get(i));
         }
-        // The offhand is reserved for temporary healing use and is never
-        // restored from the persisted soldier inventory.
+        // The entity offhand is reserved for temporary healing use and is never
+        // restored from the persistent sidearm slot.
         soldier.setItemSlot(EquipmentSlot.OFFHAND, ItemStack.EMPTY);
         soldier.setItemSlot(EquipmentSlot.MAINHAND, items.get(SLOT_MAIN_HAND));
     }
@@ -89,6 +105,9 @@ public class SoldierInventory implements Container {
         if (slot == SLOT_MAIN_HAND && mainHandChangedCallback != null) {
             mainHandChangedCallback.accept(items.get(SLOT_MAIN_HAND));
         }
+        if (slot == SLOT_SIDEARM) {
+            notifySidearmChanged();
+        }
         return result;
     }
 
@@ -98,34 +117,27 @@ public class SoldierInventory implements Container {
         if (slot == SLOT_MAIN_HAND && mainHandChangedCallback != null) {
             mainHandChangedCallback.accept(items.get(SLOT_MAIN_HAND));
         }
+        if (slot == SLOT_SIDEARM) {
+            notifySidearmChanged();
+        }
         return result;
     }
 
     @Override
     public void setItem(int slot, ItemStack stack) {
         if (slot >= 0 && slot < items.size()) {
-            if (slot == SLOT_OFF_HAND && !stack.isEmpty()) {
-                for (int generalSlot = SLOT_GENERAL_START; generalSlot < INVENTORY_SIZE; generalSlot++) {
-                    ItemStack existing = items.get(generalSlot);
-                    if (!existing.isEmpty()
-                        && ItemStack.isSameItemSameTags(existing, stack)
-                        && existing.getCount() + stack.getCount() <= existing.getMaxStackSize()) {
-                        existing.grow(stack.getCount());
-                        return;
-                    }
+            if (slot == SLOT_SIDEARM && !stack.isEmpty()) {
+                if (!GunIntegration.isGun(stack)) {
+                    return;
                 }
-                for (int generalSlot = SLOT_GENERAL_START; generalSlot < INVENTORY_SIZE; generalSlot++) {
-                    if (items.get(generalSlot).isEmpty()) {
-                        items.set(generalSlot, stack);
-                        return;
-                    }
-                }
-                // Preserve the item in the hidden legacy slot rather than
-                // silently deleting it when every general slot is occupied.
+                stack = stack.copyWithCount(1);
             }
             items.set(slot, stack);
             if (slot == SLOT_MAIN_HAND && mainHandChangedCallback != null) {
                 mainHandChangedCallback.accept(stack);
+            }
+            if (slot == SLOT_SIDEARM) {
+                notifySidearmChanged();
             }
         }
     }
@@ -135,6 +147,7 @@ public class SoldierInventory implements Container {
         if (mainHandChangedCallback != null) {
             mainHandChangedCallback.accept(items.get(SLOT_MAIN_HAND));
         }
+        notifySidearmChanged();
     }
 
     @Override
@@ -148,6 +161,7 @@ public class SoldierInventory implements Container {
         if (mainHandChangedCallback != null) {
             mainHandChangedCallback.accept(ItemStack.EMPTY);
         }
+        notifySidearmChanged();
     }
 
     public CompoundTag save() {
@@ -174,8 +188,12 @@ public class SoldierInventory implements Container {
             int slot = itemTag.getInt("Slot");
             if (slot >= 0 && slot < items.size()) {
                 ItemStack stack = ItemStack.of(itemTag);
-                if (slot == SLOT_OFF_HAND) {
-                    legacyOffhand = stack;
+                if (slot == SLOT_SIDEARM) {
+                    if (GunIntegration.isGun(stack)) {
+                        items.set(SLOT_SIDEARM, stack.copyWithCount(1));
+                    } else {
+                        legacyOffhand = stack;
+                    }
                 } else {
                     items.set(slot, stack);
                 }
@@ -193,6 +211,7 @@ public class SoldierInventory implements Container {
                 }
             }
         }
+        notifySidearmChanged();
     }
 
     public NonNullList<ItemStack> getItems() {

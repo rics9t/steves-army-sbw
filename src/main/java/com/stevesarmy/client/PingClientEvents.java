@@ -127,6 +127,7 @@ public class PingClientEvents {
             EnemyContactOverlay.clear();
             ClientSquadActivityData.INSTANCE.clear();
             ClientFireTeamSuppressionData.INSTANCE.clear();
+            ClientSuppressPingDebugData.INSTANCE.clear();
         }
     }
 
@@ -180,6 +181,7 @@ public class PingClientEvents {
         WheelCycleController.tick();
         FormationWheelHandler.tick();
         FireTeamWheelHandler.tick();
+        SwapRoleWheelHandler.tick();
         CommandStickState.get().tick();
         
         if (CombatDebugRenderer.getDebugMode() != CombatDebugRenderer.DEBUG_MODE_OFF) {
@@ -314,6 +316,9 @@ public class PingClientEvents {
             SpacingDebugRenderer.render(event.getPoseStack(), event.getCamera());
             FireTeamSuppressionDebugRenderer.render(event.getPoseStack(), event.getCamera());
             VehicleCrewDebugRenderer.render(event.getPoseStack(), event.getCamera());
+            ArmorDoctrineDebugRenderer.render(event.getPoseStack(), event.getCamera());
+            SuppressPingDebugRenderer.render(event.getPoseStack(), event.getCamera());
+            SidearmDebugRenderer.render(event.getPoseStack(), event.getCamera());
             CommandStickRenderer.render(event.getPoseStack(), event.getCamera(), event.getPartialTick());
         }
     }
@@ -339,7 +344,11 @@ public class PingClientEvents {
             if (FormationWheelHandler.isWheelActive()) {
                 FormationWheelRenderer.render(event.getGuiGraphics());
             }
-            
+
+            if (SwapRoleWheelHandler.isWheelActive()) {
+                SwapRoleWheelRenderer.render(event.getGuiGraphics());
+            }
+
             EnemyContactOverlay.render(event.getGuiGraphics(), lastWorldRenderContext);
             PingOverlayRenderer.render(event.getGuiGraphics(), lastWorldRenderContext);
             SquadActivityOverlayRenderer.render(event.getGuiGraphics(), lastWorldRenderContext);

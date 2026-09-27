@@ -2,7 +2,6 @@ package com.stevesarmy.client;
 
 import com.stevesarmy.StevesArmyMod;
 import com.stevesarmy.client.renderer.EnemySoldierRenderer;
-import com.stevesarmy.client.renderer.ResupplyPouchRenderer;
 import com.stevesarmy.client.renderer.SoldierRenderer;
 import com.stevesarmy.client.renderer.TargetRenderer;
 import com.stevesarmy.client.screen.SoldierInventoryScreen;
@@ -26,9 +25,12 @@ public class ClientSetup {
         event.registerEntityRenderer(ModEntities.GARRISON.get(), SoldierRenderer::new);
         event.registerEntityRenderer(ModEntities.TEAM_GARRISON.get(), SoldierRenderer::new);
         event.registerEntityRenderer(ModEntities.VEHICLE_CREW.get(), SoldierRenderer::new);
+        event.registerEntityRenderer(ModEntities.ANTI_TANK.get(), SoldierRenderer::new);
         event.registerEntityRenderer(ModEntities.TARGET.get(), TargetRenderer::new);
         event.registerEntityRenderer(ModEntities.ENEMY_SOLDIER.get(), EnemySoldierRenderer::new);
-        event.registerEntityRenderer(ModEntities.RESUPPLY_POUCH.get(), ResupplyPouchRenderer::new);
+        event.registerEntityRenderer(ModEntities.ENEMY_VEHICLE_CREW.get(), EnemySoldierRenderer::new);
+        event.registerEntityRenderer(ModEntities.ENEMY_ANTI_TANK.get(), EnemySoldierRenderer::new);
+        event.registerEntityRenderer(ModEntities.SUPPLY_POUCH.get(), net.minecraft.client.renderer.entity.ThrownItemRenderer::new);
     }
 
     @SubscribeEvent

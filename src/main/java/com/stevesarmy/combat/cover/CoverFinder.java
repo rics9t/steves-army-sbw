@@ -2,8 +2,12 @@ package com.stevesarmy.combat.cover;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.tags.BlockTags;
+import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.shapes.VoxelShape;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
@@ -12,6 +16,7 @@ import net.minecraft.world.phys.Vec3;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
+import com.stevesarmy.StevesArmyConfig;
 import com.stevesarmy.StevesArmyMod;
 import com.stevesarmy.combat.ExposureCalculator;
 import com.stevesarmy.combat.ModBlockTags;
@@ -55,6 +60,14 @@ public class CoverFinder {
     // A block-center target is commonly inside the block and causes shots to hit cover.
     private static final double[] HALF_COVER_OPENING_HEIGHTS = {0.12, 0.42};
     private static final double[] HALF_COVER_LATERAL_OFFSETS = {-0.28, 0.0, 0.28};
+
+    // Heavy-weapon suppression aims AT the cover blocks themselves: the aim
+    // point sits this far proud of the impact face so the pre-shot visibility
+    // ray stays clear while the round still strikes the block.
+    private static final double HEAVY_AIM_PROUD_OFFSET = 0.15;
+    private static final int MAX_HEAVY_AIM_POINTS = 16;
+    /** Blocks closer than this to the shooter are skipped (backblast/self-damage). */
+    private static final double HEAVY_AIM_MIN_SELF_DISTANCE_SQR = 9.0;
     
     private static final double FOLLOW_MODE_MAX_OWNER_DISTANCE = 15.0;
 
@@ -472,7 +485,7 @@ public class CoverFinder {
             firingQuality = 0.0f;
             firingAccessScore = 0.0f;
         }
-        
+
         float weightedScore;
         if (isAttackMode) {
             weightedScore = (float)(primaryProtection * PRIMARY_PROTECTION_WEIGHT +
@@ -487,7 +500,7 @@ public class CoverFinder {
                            firingQuality * FIRING_QUALITY_WEIGHT +
                            firingAccessScore * PEEK_ANGLE_WEIGHT) + fightability - blindPenalty;
         }
-        
+
         if (com.stevesarmy.debug.DiagnosticLogManager.isCoverScoreLoggingEnabled()) {
             StevesArmyMod.LOGGER.info("[CoverScore] {} type={} q={} prim={} flank={} dist={} firing={} lane={} laneSource={} contacts={}/{} fight={} blindPen={} TOTAL={}",
                 coverPoint.getPosition(), coverPoint.getType(),
@@ -814,6 +827,11 @@ public class CoverFinder {
             if (isBetterFiringLane(candidate, best)) {
                 best = candidate;
             }
+            if (best.score() >= 1.0f) {
+                // A perfect lane cannot be improved; further peek origins would
+                // only repeat the full aim-point + contact ray work.
+                break;
+            }
         }
         return best;
     }
@@ -861,11 +879,17 @@ public class CoverFinder {
         float reachableWeight = 0.0f;
         int eligible = 0;
         int reachable = 0;
+        int contactBudget = StevesArmyConfig.COVER_SCORING_MAX_CONTACTS.get();
 
         for (SquadCoverContext.FiringContact contact : squadCtx.getFiringContacts()) {
             float freshness = contact.freshnessAt(currentTick);
             if (freshness <= 0.0f) {
                 continue;
+            }
+            if (contactBudget > 0 && eligible >= contactBudget) {
+                // Scoring samples the first fresh contacts instead of tracing a
+                // ray per contact per candidate; peek decisions still see all.
+                break;
             }
 
             eligible++;
@@ -1338,6 +1362,165 @@ return qualityScore + shootBonus - distancePenalty;
         }
         
         return aimPoints;
+    }
+
+    /**
+     * Heavy-weapon suppression: aim points ON the cover blocks around the ping
+     * instead of the peek openings. Each point is where a round from this
+     * soldier actually impacts a wall block (the near-face clip hit, pulled
+     * slightly proud of the surface), so an explosive round bursts against the
+     * cover and suppresses whoever hides behind it. Blocks the ray cannot clip
+     * are skipped — a rocket aimed there would overfly and waste the shot.
+     */
+    public java.util.List<Vec3> findHeavySuppressionAimPoints(
+            SoldierEntity soldier,
+            BlockPos pingCenter,
+            double radius) {
+
+        java.util.List<Vec3> aimPoints = new java.util.ArrayList<>();
+        java.util.Set<BlockPos> sampledBlocks = new java.util.HashSet<>();
+        Vec3 eye = soldier.getEyePosition();
+
+        for (CoverPoint cover : findCoverPoints(pingCenter, (int) radius)) {
+            // Shell the wall the enemy hides behind; for half cover that wall
+            // is the cover block itself.
+            java.util.List<BlockPos> targetBlocks = new java.util.ArrayList<>();
+            if (cover.getType() == CoverType.HALF) {
+                targetBlocks.add(cover.getPosition());
+            } else {
+                for (Direction protectedDir : cover.getProtectedDirections()) {
+                    targetBlocks.add(cover.getPosition().relative(protectedDir));
+                }
+            }
+
+            for (BlockPos block : targetBlocks) {
+                if (!sampledBlocks.add(block)) continue;
+                if (block.distToCenterSqr(eye) < HEAVY_AIM_MIN_SELF_DISTANCE_SQR) continue;
+
+                BlockState state = level.getBlockState(block);
+                VoxelShape shape = state.getCollisionShape(level, block);
+                if (shape.isEmpty()) continue;
+                Vec3 blockCenter = Vec3.atCenterOf(block);
+                BlockHitResult hit = shape.clip(eye, blockCenter, block);
+                if (hit == null || hit.getType() != HitResult.Type.BLOCK) continue;
+
+                aimPoints.add(proudFacePoint(eye, hit.getLocation()));
+                if (aimPoints.size() >= MAX_HEAVY_AIM_POINTS) {
+                    return aimPoints;
+                }
+            }
+        }
+
+        // Registered cover only exists where somebody already searched; a
+        // freshly pinged zone usually has none. Fill the remainder from ray
+        // hits so the launcher still gets hittable wall faces.
+        addRaycastHeavyAimPoints(soldier, pingCenter, radius, eye, aimPoints, sampledBlocks);
+
+        return aimPoints;
+    }
+
+    /**
+     * Ray-fan fallback for heavy suppression: cast rays from the shooter
+     * across the zone and aim at the first solid wall each one strikes. The
+     * points are the same proud near-face clips the registry path produces,
+     * so they are hittable by construction. Leaf hits are kept separately and
+     * only used when no bare wall is reachable — a rocket bursts in the
+     * canopy either way, but a wall face is the intended target.
+     */
+    private void addRaycastHeavyAimPoints(SoldierEntity soldier, BlockPos pingCenter, double radius,
+                                          Vec3 eye, java.util.List<Vec3> aimPoints,
+                                          java.util.Set<BlockPos> sampledBlocks) {
+        Vec3 center = Vec3.atCenterOf(pingCenter);
+        double maxOffsetSqr = (radius + 3.0) * (radius + 3.0);
+        java.util.List<Vec3> solidFaces = new java.util.ArrayList<>();
+        java.util.List<Vec3> leafFaces = new java.util.ArrayList<>();
+
+        for (Vec3 rayTarget : heavyRayFan(center, radius)) {
+            BlockHitResult hit = clipBlockRay(eye, rayTarget, soldier);
+            if (hit == null) continue;
+            Vec3 hitPos = hit.getLocation();
+            if (hitPos.distanceToSqr(eye) < HEAVY_AIM_MIN_SELF_DISTANCE_SQR) continue;
+            if (hitPos.distanceToSqr(center) > maxOffsetSqr) continue;
+            if (!sampledBlocks.add(hit.getBlockPos())) continue;
+            (level.getBlockState(hit.getBlockPos()).is(BlockTags.LEAVES) ? leafFaces : solidFaces)
+                .add(proudFacePoint(eye, hitPos));
+        }
+
+        for (Vec3 face : solidFaces) {
+            if (aimPoints.size() >= MAX_HEAVY_AIM_POINTS) return;
+            aimPoints.add(face);
+        }
+        for (Vec3 face : leafFaces) {
+            if (aimPoints.size() >= MAX_HEAVY_AIM_POINTS) return;
+            aimPoints.add(face);
+        }
+    }
+
+    /**
+     * Last-resort heavy lane: every cached face point is blocked from the
+     * current eye (the soldier moved after discovery, or discovery ran from
+     * another position). Clip a fresh wall face inside the zone; its proud
+     * face point has a clear solid path from this eye by construction.
+     * Returns the hit closest to the ping centre, preferring bare walls over
+     * foliage, or null when every ray misses.
+     */
+    public Vec3 findFreshHeavyLaneIntoZone(SoldierEntity soldier, BlockPos pingCenter, double radius) {
+        Vec3 eye = soldier.getEyePosition();
+        Vec3 center = Vec3.atCenterOf(pingCenter);
+        double maxOffsetSqr = (radius + 3.0) * (radius + 3.0);
+        Vec3 bestSolid = null;
+        Vec3 bestLeaf = null;
+        double bestSolidDistSqr = Double.MAX_VALUE;
+        double bestLeafDistSqr = Double.MAX_VALUE;
+
+        for (Vec3 rayTarget : heavyRayFan(center, radius)) {
+            BlockHitResult hit = clipBlockRay(eye, rayTarget, soldier);
+            if (hit == null) continue;
+            Vec3 hitPos = hit.getLocation();
+            if (hitPos.distanceToSqr(eye) < HEAVY_AIM_MIN_SELF_DISTANCE_SQR) continue;
+            if (hitPos.distanceToSqr(center) > maxOffsetSqr) continue;
+
+            double distSqr = hitPos.distanceToSqr(center);
+            if (level.getBlockState(hit.getBlockPos()).is(BlockTags.LEAVES)) {
+                if (distSqr < bestLeafDistSqr) {
+                    bestLeafDistSqr = distSqr;
+                    bestLeaf = proudFacePoint(eye, hitPos);
+                }
+            } else if (distSqr < bestSolidDistSqr) {
+                bestSolidDistSqr = distSqr;
+                bestSolid = proudFacePoint(eye, hitPos);
+            }
+        }
+
+        return bestSolid != null ? bestSolid : bestLeaf;
+    }
+
+    private BlockHitResult clipBlockRay(Vec3 from, Vec3 to, SoldierEntity soldier) {
+        BlockHitResult hit = level.clip(new ClipContext(from, to,
+            ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, soldier));
+        return hit.getType() == HitResult.Type.BLOCK ? hit : null;
+    }
+
+    private static Vec3 proudFacePoint(Vec3 eye, Vec3 hitPos) {
+        return hitPos.add(eye.subtract(hitPos).normalize().scale(HEAVY_AIM_PROUD_OFFSET));
+    }
+
+    /** Rays sample the zone centre and two rings so walls on any side of the
+     *  zone get a chance to catch a face point. */
+    private static java.util.List<Vec3> heavyRayFan(Vec3 center, double radius) {
+        java.util.List<Vec3> targets = new java.util.ArrayList<>(18);
+        targets.add(center.add(0, 0.5, 0));
+        targets.add(center.add(0, 1.5, 0));
+        for (int ring = 0; ring < 2; ring++) {
+            double ringRadius = radius * (ring == 0 ? 0.5 : 1.0);
+            double height = ring == 0 ? 1.2 : 1.8;
+            for (int i = 0; i < 8; i++) {
+                double angle = Math.toRadians(i * 45.0);
+                targets.add(new Vec3(center.x + Math.cos(angle) * ringRadius,
+                    center.y + height, center.z + Math.sin(angle) * ringRadius));
+            }
+        }
+        return targets;
     }
 
     /** Adds one raycast-validated exposure point for each half-cover peek block. */

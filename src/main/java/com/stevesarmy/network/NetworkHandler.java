@@ -14,7 +14,7 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 
 public class NetworkHandler {
-    private static final String PROTOCOL_VERSION = "11";
+    private static final String PROTOCOL_VERSION = "13";
     
     public static final SimpleChannel INSTANCE = NetworkRegistry.newSimpleChannel(
         new ResourceLocation(StevesArmyMod.MODID, "main"),
@@ -156,6 +156,10 @@ public class NetworkHandler {
             VehicleCrewDebugPacket::encode,
             VehicleCrewDebugPacket::new,
             VehicleCrewDebugPacket::handle);
+        INSTANCE.registerMessage(id++, ArmorDoctrineDebugPacket.class,
+            ArmorDoctrineDebugPacket::encode,
+            ArmorDoctrineDebugPacket::new,
+            ArmorDoctrineDebugPacket::handle);
         INSTANCE.registerMessage(id++, VehicleCrewDismountPacket.class,
             VehicleCrewDismountPacket::encode,
             VehicleCrewDismountPacket::new,
@@ -164,6 +168,26 @@ public class NetworkHandler {
             CommandStickAssignCrewPacket::encode,
             CommandStickAssignCrewPacket::new,
             CommandStickAssignCrewPacket::handle);
+        INSTANCE.registerMessage(id++, SuppressPingDebugPacket.class,
+            SuppressPingDebugPacket::encode,
+            SuppressPingDebugPacket::new,
+            SuppressPingDebugPacket::handle);
+        INSTANCE.registerMessage(id++, SidearmDebugPacket.class,
+            SidearmDebugPacket::encode,
+            SidearmDebugPacket::new,
+            SidearmDebugPacket::handle);
+        INSTANCE.registerMessage(id++, SwapSoldierPacket.class,
+            SwapSoldierPacket::encode,
+            SwapSoldierPacket::decode,
+            SwapSoldierPacket::handle);
+        INSTANCE.registerMessage(id++, SetFofStancePacket.class,
+            SetFofStancePacket::encode,
+            SetFofStancePacket::decode,
+            SetFofStancePacket::handle);
+        INSTANCE.registerMessage(id++, FofSyncPacket.class,
+            FofSyncPacket::encode,
+            FofSyncPacket::decode,
+            FofSyncPacket::handle);
     }
 
     @SuppressWarnings({"rawtypes", "unchecked"})

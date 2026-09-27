@@ -264,15 +264,17 @@ public class PingWheelHandler {
         Minecraft mc = Minecraft.getInstance();
         long windowHandle = mc.getWindow().getWindow();
         double[] xpos = new double[1];
-        GLFW.glfwGetCursorPos(windowHandle, xpos, null);
+        double[] ypos = new double[1];
+        GLFW.glfwGetCursorPos(windowHandle, xpos, ypos);
         return xpos[0] - pressMouseX;
     }
 
     public static double getDeltaY() {
         Minecraft mc = Minecraft.getInstance();
         long windowHandle = mc.getWindow().getWindow();
+        double[] xpos = new double[1];
         double[] ypos = new double[1];
-        GLFW.glfwGetCursorPos(windowHandle, null, ypos);
+        GLFW.glfwGetCursorPos(windowHandle, xpos, ypos);
         return ypos[0] - pressMouseY;
     }
 

@@ -9,6 +9,7 @@ import com.stevesarmy.combat.CombatDebugData;
 import com.stevesarmy.combat.DetectionSystem;
 import com.stevesarmy.combat.GrenadeIntegration;
 import com.stevesarmy.combat.GunIntegration;
+import com.stevesarmy.combat.SbwVehicleGunnery;
 import com.stevesarmy.combat.ThreatAwareness;
 import com.stevesarmy.combat.cover.CoverBehaviorManager;
 import com.stevesarmy.combat.cover.CoverPoint;
@@ -24,6 +25,7 @@ import com.stevesarmy.entity.ai.SoldierHoldPositionGoal;
 import com.stevesarmy.entity.ai.SoldierHealController;
 import com.stevesarmy.entity.ai.SoldierMoveToPingGoal;
 import com.stevesarmy.entity.ai.SoldierStrollGoal;
+import com.stevesarmy.entity.ai.SuppressionOrderController;
 import com.stevesarmy.entity.ai.CoverTacticalGoal;
 import com.stevesarmy.entity.ai.CombatGoalController;
 import com.stevesarmy.entity.ai.CoverGoalController;
@@ -36,6 +38,9 @@ import com.stevesarmy.network.OpenSoldierInventoryMessage;
 import com.stevesarmy.squad.FireDiscipline;
 import com.stevesarmy.squad.FireTeam;
 import com.stevesarmy.squad.FireTeamAssignment;
+import com.stevesarmy.squad.FofCategory;
+import com.stevesarmy.squad.FofSettings;
+import com.stevesarmy.squad.FofStance;
 import com.stevesarmy.squad.SquadManager;
 import com.stevesarmy.squad.SquadThreatIntel;
 import com.stevesarmy.squad.SquadMode;
@@ -51,6 +56,7 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.Mth;
 import net.minecraft.server.level.ServerPlayer;
@@ -188,9 +194,16 @@ public class SoldierEntity extends PathfinderMob implements Container {
     private static final EntityDataAccessor<Boolean> MG_DEBUG_FALLBACK =
         SynchedEntityData.defineId(SoldierEntity.class, EntityDataSerializers.BOOLEAN);
 
+    /** Mirror of the sidearm slot for clients; the back-weapon layer draws this while it is not held. */
+    private static final EntityDataAccessor<ItemStack> DATA_STOWED_WEAPON =
+        SynchedEntityData.defineId(SoldierEntity.class, EntityDataSerializers.ITEM_STACK);
+
     private static final int HALF_COVER_RISE_TICKS = 8;
     private static final int NAVIGATION_LANDING_LOCK_TICKS = 4;
     private static final int NAVIGATION_COLLISION_LOCK_TICKS = 2;
+
+    /** How long a NEUTRAL-marked attacker stays a valid retaliation target. */
+    private static final int NEUTRAL_RETALIATION_TICKS = 200;
 
     @Nullable
     private UUID squadId;
@@ -222,6 +235,11 @@ public class SoldierEntity extends PathfinderMob implements Container {
     private int navigationTraversalLockUntilTick = -1;
     private int navigationTraversalHeightDelta;
     private String navigationTraversalLockReason = "none";
+
+    /** FoF: last NEUTRAL-marked entity that damaged us, for the retaliation window. */
+    @Nullable
+    private LivingEntity neutralAttacker;
+    private int neutralAttackerTick = Integer.MIN_VALUE;
     /** True when combat, rather than cover movement, owns the low-prone posture. */
     private boolean firingProne = false;
     /** Armed only by a low-crouch exit; prevents unrelated peek transitions from rising. */
@@ -256,9 +274,7 @@ public class SoldierEntity extends PathfinderMob implements Container {
     private long forcedTargetTimestamp = 0;
     private static final long FORCED_TARGET_MEMORY_MS = 10000;
     
-    private BlockPos pingSuppressPos = null;
-    private long pingSuppressTimestamp = 0;
-    private static final long PING_SUPPRESS_MEMORY_MS = 10000;
+    private final SuppressionOrderController suppressionOrder = new SuppressionOrderController();
     private java.util.List<Vec3> suppressionAimPoints = new java.util.ArrayList<>();
     private Vec3 lastSuppressionAimPoint = null;
     public static final double SUPPRESSION_ZONE_RADIUS = 15.0;
@@ -292,6 +308,21 @@ public class SoldierEntity extends PathfinderMob implements Container {
 
     public boolean isCqbEngagementHold() {
         return cqbEngagementHold;
+    }
+
+    private boolean vehicleEngagement;
+
+    /**
+     * True while the combat goal holds a live vehicle contact as its
+     * engagement. Cover reads this to pause opportunistic re-selection; the
+     * combat goal owns setting and clearing it.
+     */
+    public boolean isInVehicleEngagement() {
+        return vehicleEngagement;
+    }
+
+    public void setVehicleEngagement(boolean vehicleEngagement) {
+        this.vehicleEngagement = vehicleEngagement;
     }
 
     public void beginCqbEngagement() {
@@ -382,6 +413,23 @@ public class SoldierEntity extends PathfinderMob implements Container {
                 }
             }
         });
+        this.inventory.setSidearmChangedCallback(stack -> syncStowedWeaponData());
+    }
+
+    /**
+     * Publishes the sidearm slot to clients as the stowed weapon. After a
+     * weapon swap the not-held gun always ends up in the sidearm slot, so this
+     * is all the back-weapon layer needs; server-side only, vanilla entity
+     * data sync carries it the rest of the way.
+     */
+    private void syncStowedWeaponData() {
+        if (this.level().isClientSide) return;
+        entityData.set(DATA_STOWED_WEAPON, inventory.getItem(SoldierInventory.SLOT_SIDEARM).copy());
+    }
+
+    /** The gun currently stowed on the soldier's back (the sidearm slot mirror). */
+    public ItemStack getStowedWeapon() {
+        return entityData.get(DATA_STOWED_WEAPON);
     }
 
     @Override
@@ -445,6 +493,7 @@ public class SoldierEntity extends PathfinderMob implements Container {
         this.entityData.define(MG_DEBUG_SUPPRESSED, false);
         this.entityData.define(MG_DEBUG_MOVEMENT_POSITION, BlockPos.ZERO);
         this.entityData.define(MG_DEBUG_FALLBACK, false);
+        this.entityData.define(DATA_STOWED_WEAPON, ItemStack.EMPTY);
     }
 
     @Override
@@ -597,7 +646,6 @@ public class SoldierEntity extends PathfinderMob implements Container {
         CompoundTag tag = new CompoundTag();
         tag.put("Inventory", inventory.save());
         tag.putInt("Role", getRole().ordinal());
-        getOwnerUUID().ifPresent(owner -> tag.putUUID("Owner", owner));
         tag.putInt("FollowState", getFollowState());
         tag.putInt("SquadMode", getSquadMode().ordinal());
         UUID squadId = getSquadId();
@@ -632,17 +680,18 @@ public class SoldierEntity extends PathfinderMob implements Container {
             case GARRISON -> ModItems.GARRISON_SPAWN_EGG.get();
             case SUPPORT -> ModItems.SUPPORT_SPAWN_EGG.get();
             case VEHICLE_CREW -> ModItems.VEHICLE_CREW_SPAWN_EGG.get();
+            case ANTI_TANK -> ModItems.ANTI_TANK_SPAWN_EGG.get();
         };
     }
 
     /**
      * Restores the persistent soldier state carried by a pick-blocked spawn egg.
-     * Position is not touched; the caller places the entity.
+     * Position is not touched; the caller places the entity. Ownership and squad
+     * membership are deliberately not restored — the player spawning the egg
+     * becomes the owner via {@link SoldierSpawner#finishSpawn}, so a traded or
+     * cloned egg never stays loyal to the player it was picked from.
      */
     public void fillFromPickBlockData(CompoundTag entityTag) {
-        if (entityTag.hasUUID("Owner")) {
-            setOwnerUUID(entityTag.getUUID("Owner"));
-        }
         if (entityTag.contains("FollowState")) {
             setFollowState(entityTag.getInt("FollowState"));
         }
@@ -652,10 +701,6 @@ public class SoldierEntity extends PathfinderMob implements Container {
             if (modeOrdinal >= 0 && modeOrdinal < modes.length) {
                 setSquadMode(modes[modeOrdinal]);
             }
-        }
-        if (entityTag.contains("HasSquad") && entityTag.getBoolean("HasSquad")
-            && entityTag.hasUUID("SquadId")) {
-            setSquadId(entityTag.getUUID("SquadId"));
         }
         if (entityTag.contains("HoldPos")) {
             setHoldPosition(BlockPos.of(entityTag.getLong("HoldPos")));
@@ -953,6 +998,10 @@ public class SoldierEntity extends PathfinderMob implements Container {
 
     @Override
     public boolean canAttack(LivingEntity target) {
+        // An explicit HOSTILE mark beats team/owner alliance (traitor-teammate case).
+        if (target != this && getFofOverride(target) == FofStance.HOSTILE) {
+            return super.canAttack(target);
+        }
         if (target instanceof SoldierEntity soldier && soldier.getOwnerUUID().equals(this.getOwnerUUID())) {
             return false;
         }
@@ -986,9 +1035,56 @@ public class SoldierEntity extends PathfinderMob implements Container {
         return ownerTeam != null && ownerTeam.isAlliedTo(otherTeam);
     }
     
+    /**
+     * Explicit FoF stance this soldier's owner marked on other, or null when
+     * the built-in default rules apply. Server side only; client-side calls
+     * (rendering, prediction) fall back to the defaults.
+     */
+    @Nullable
+    public FofStance getFofOverride(LivingEntity other) {
+        if (this.level().isClientSide) return null;
+        MinecraftServer server = this.level().getServer();
+        if (server == null) return null;
+        Optional<UUID> ownerUUID = getOwnerUUID();
+        if (ownerUUID.isEmpty()) return null;
+        return FofSettings.resolveStance(server, ownerUUID.get(), other);
+    }
+
+    /**
+     * Whether this soldier may proactively hunt the candidate. NEUTRAL-marked
+     * entities are left alone until they attack us; every other entity
+     * follows the default rules.
+     */
+    public boolean isProactiveTarget(LivingEntity candidate) {
+        if (getFofOverride(candidate) != FofStance.NEUTRAL) return true;
+        return candidate == neutralAttacker
+            && this.tickCount - neutralAttackerTick <= NEUTRAL_RETALIATION_TICKS;
+    }
+
+    /** Category targeting gate: an explicit FoF stance replaces the config default. */
+    public boolean fofCategoryAllows(FofCategory category, boolean configDefault) {
+        if (this.level().isClientSide) return configDefault;
+        MinecraftServer server = this.level().getServer();
+        if (server == null) return configDefault;
+        Optional<UUID> ownerUUID = getOwnerUUID();
+        if (ownerUUID.isEmpty()) return configDefault;
+        FofSettings.OwnerFof fof = FofSettings.get(server).peek(ownerUUID.get());
+        FofStance override = fof != null ? fof.resolveCategory(category) : null;
+        if (override == null) return configDefault;
+        return override != FofStance.FRIENDLY;
+    }
+
     public boolean isFriendlyTo(LivingEntity other) {
         if (other == this) return false;
-        
+
+        // Explicit per-owner FoF overrides sit above the default rules below.
+        // FRIENDLY protects even team enemies; HOSTILE engages even team allies;
+        // NEUTRAL falls through as non-friendly (retaliation still works) and
+        // is kept out of proactive targeting by isProactiveTarget.
+        FofStance override = getFofOverride(other);
+        if (override == FofStance.FRIENDLY) return true;
+        if (override == FofStance.HOSTILE) return false;
+
         if (isAlliedByTeam(other)) return true;
         
         LivingEntity owner = getOwner();
@@ -1035,6 +1131,11 @@ public class SoldierEntity extends PathfinderMob implements Container {
 
     @Override
     public boolean canHoldItem(ItemStack stack) {
+        // Soldiers never swallow supply pouches; the pouch must stay intact for
+        // players. AI resupply happens via thrown pouches instead.
+        if (stack.getItem() instanceof com.stevesarmy.item.SupplyPouchItem) {
+            return false;
+        }
         return true;
     }
 
@@ -1042,7 +1143,9 @@ public class SoldierEntity extends PathfinderMob implements Container {
     protected void pickUpItem(ItemEntity itemEntity) {
         ItemStack stack = itemEntity.getItem();
         int count = stack.getCount();
-        
+        boolean pickedGun = GunIntegration.isGun(stack);
+        boolean pickedLauncher = pickedGun && com.stevesarmy.combat.ArmorRoleManager.isAtGunStack(stack);
+
         // Try to put in an existing partial stack in bag slots first
         for (int i = SoldierInventory.SLOT_GENERAL_START; i < inventory.getContainerSize(); i++) {
             ItemStack existing = inventory.getItem(i);
@@ -1068,6 +1171,9 @@ public class SoldierEntity extends PathfinderMob implements Container {
                 inventory.setItem(i, toInsert);
                 inventory.setChanged();
                 itemEntity.discard();
+                if (pickedGun) {
+                    onGunPickedUp(pickedLauncher);
+                }
                 return;
             }
         }
@@ -1075,12 +1181,61 @@ public class SoldierEntity extends PathfinderMob implements Container {
         // The main hand is reserved for firearms. Do not let vanilla pickup
         // behavior replace a soldier's gun with a knife or other item.
         ItemStack mainHand = inventory.getItem(SoldierInventory.SLOT_MAIN_HAND);
-        if (mainHand.isEmpty() && GunIntegration.isGun(stack)) {
+        if (mainHand.isEmpty() && pickedGun) {
             ItemStack toInsert = stack.split(count);
             inventory.setItem(SoldierInventory.SLOT_MAIN_HAND, toInsert);
             inventory.setChanged();
             itemEntity.discard();
+            onGunPickedUp(pickedLauncher);
             return;
+        }
+    }
+
+    /**
+     * After a gun lands in the inventory, re-slot guns into the standard
+     * layout; picking up a launcher turns an owned non-AT soldier into an
+     * AT soldier with the launcher stowed in the sidearm slot.
+     */
+    private void onGunPickedUp(boolean launcherPicked) {
+        if (level().isClientSide) {
+            return;
+        }
+        if (launcherPicked && getRole() != SoldierRole.ANTI_TANK && getRole() != SoldierRole.GARRISON
+            && !(this instanceof TeamGarrisonEntity) && getOwnerUUID().isPresent()) {
+            SoldierEntity replacement = SoldierRoleHandler.convertSoldier(this, SoldierRole.ANTI_TANK);
+            if (replacement != null) {
+                com.stevesarmy.combat.SoldierWeaponSelector.normalizeGunSlots(replacement);
+                return;
+            }
+        }
+        com.stevesarmy.combat.SoldierWeaponSelector.normalizeGunSlots(this);
+    }
+
+    /**
+     * Soldiers drop their whole persistent inventory inside ONE supply pouch
+     * instead of vanishing with it (or showering item entities). Replaces
+     * vanilla's 8.5%-per-slot chance loop, which would roll duplicates against
+     * the mirrored SoldierInventory.
+     */
+    @Override
+    protected void dropCustomDeathLoot(net.minecraft.world.damagesource.DamageSource source,
+                                       int lootingLevel, boolean recentlyHit) {
+        if (!StevesArmyConfig.isSoldierDeathDropsEnabled()) {
+            return;
+        }
+        boolean anyItems = false;
+        for (int i = 0; i < inventory.getContainerSize(); i++) {
+            if (!inventory.getItem(i).isEmpty()) {
+                anyItems = true;
+                break;
+            }
+        }
+        if (!anyItems) {
+            return;
+        }
+        com.stevesarmy.inventory.PouchContainer.dropInventoryAsPouch(this, inventory);
+        for (int i = 0; i < inventory.getContainerSize(); i++) {
+            inventory.setItem(i, ItemStack.EMPTY);
         }
     }
 
@@ -1270,6 +1425,7 @@ public class SoldierEntity extends PathfinderMob implements Container {
         if (coverBehaviorManager != null) {
             coverBehaviorManager.tickSuppression(coverBehaviorManager.isInCover());
         }
+        suppressionOrder.tick(this);
         refreshAttackTargetUnderFire();
         tickCoverStuckWatchdog();
 
@@ -1278,6 +1434,10 @@ public class SoldierEntity extends PathfinderMob implements Container {
             com.stevesarmy.compat.sbw.SbwCompat.tickVehicle(this);
         }
         if (VS2Compat.prepareSoldierAi(this)) {
+            // Frozen-AI gunnery: while mounted on a Superb Warfare vehicle the
+            // soldier's only duty is spotting — SBW fires the vehicle weapons at
+            // whatever the riding Mob targets.
+            SbwVehicleGunnery.tickMounted(this);
             if (shouldTickGrenadeController(gameTime)) {
                 grenadeTacticalController.tick(getTarget(), getGrenadeSquadIntel());
             }
@@ -1426,6 +1586,13 @@ public class SoldierEntity extends PathfinderMob implements Container {
             if (isRecalling()) {
                 cancelRecall();
             }
+            // A NEUTRAL-marked attacker forfeits neutrality: remember them so
+            // isProactiveTarget lets the squad fight back for a while.
+            if (source.getEntity() instanceof LivingEntity neutralCandidate && neutralCandidate != this
+                && getFofOverride(neutralCandidate) == FofStance.NEUTRAL) {
+                this.neutralAttacker = neutralCandidate;
+                this.neutralAttackerTick = this.tickCount;
+            }
             if (coverBehaviorManager != null) {
                 CoverBehaviorManager.CoverState preState = coverBehaviorManager.getState();
                 PeekController.State prePeekState = peekController.getState();
@@ -1477,6 +1644,14 @@ public class SoldierEntity extends PathfinderMob implements Container {
     public void receivePing(com.stevesarmy.ping.PingType type, net.minecraft.world.phys.Vec3 position) {
         com.stevesarmy.StevesArmyMod.LOGGER.info("Soldier received ping: type={} pos={}", type, position);
         
+        if (type == com.stevesarmy.ping.PingType.SEND
+            || type == com.stevesarmy.ping.PingType.GO_TO
+            || type == com.stevesarmy.ping.PingType.ATTACK
+            || type == com.stevesarmy.ping.PingType.FOLLOW
+            || type == com.stevesarmy.ping.PingType.HOLD) {
+            clearPingSuppressPos();
+        }
+
         switch (type) {
             case SEND -> {
                 BlockPos pos = BlockPos.containing(position);
@@ -1537,8 +1712,15 @@ public class SoldierEntity extends PathfinderMob implements Container {
                 StevesArmyMod.LOGGER.info("Switched to HOLD mode, cleared all threat data");
             }
             case SUPPRESS_AREA -> {
-                pingSuppressPos = BlockPos.containing(position);
-                pingSuppressTimestamp = System.currentTimeMillis();
+                if (getRole() == SoldierRole.SUPPORT || getRole() == SoldierRole.VEHICLE_CREW || isVehicleCrewActive()) {
+                    LivingEntity owner = getOwner();
+                    if (owner instanceof ServerPlayer player) {
+                        player.sendSystemMessage(Component.literal("[Squad] " + getName().getString()
+                            + " cannot execute suppress-area orders."));
+                    }
+                    return;
+                }
+                setPingSuppressPos(BlockPos.containing(position));
                 suppressionAimPoints.clear();
                 lastSuppressionAimPoint = null;
                 
@@ -1546,7 +1728,7 @@ public class SoldierEntity extends PathfinderMob implements Container {
                     this.combatGoal.forceRestartPingSuppression();
                 }
                 
-                StevesArmyMod.LOGGER.info("Set suppress area: {}", pingSuppressPos);
+                StevesArmyMod.LOGGER.info("Set suppress area: {}", getPingSuppressPos());
             }
             case ATTACK -> {
                 setAttackTarget(BlockPos.containing(position));
@@ -1713,28 +1895,33 @@ public BlockPos getPingMoveTarget() {
     }
     
     public BlockPos getPingSuppressPos() {
-        return pingSuppressPos;
+        return suppressionOrder.getArea();
     }
     
     public boolean hasValidPingSuppressPos() {
-        return pingSuppressPos != null &&
-               System.currentTimeMillis() - pingSuppressTimestamp < PING_SUPPRESS_MEMORY_MS;
+        return suppressionOrder.isActive();
     }
 
     public void setPingSuppressPos(BlockPos pos) {
-        if (pingSuppressPos == null || !pingSuppressPos.equals(pos)) {
+        if (suppressionOrder.isActive() && coverTacticalGoal != null) {
+            coverTacticalGoal.cancelSuppressionPosition(suppressionOrder.getGeneration());
+        }
+        if (suppressionOrder.getArea() == null || !suppressionOrder.getArea().equals(pos)) {
             suppressionAimPoints.clear();
             lastSuppressionAimPoint = null;
         }
-        this.pingSuppressPos = pos;
-        this.pingSuppressTimestamp = System.currentTimeMillis();
+        suppressionOrder.start(pos, tickCount);
+        suppressionOrder.setOrigin(blockPosition());
     }
     
     public void clearPingSuppressPos() {
-        pingSuppressPos = null;
-        pingSuppressTimestamp = 0;
+        suppressionOrder.cancel();
         suppressionAimPoints.clear();
         lastSuppressionAimPoint = null;
+    }
+
+    public SuppressionOrderController getSuppressionOrder() {
+        return suppressionOrder;
     }
     
     public java.util.List<Vec3> getSuppressionAimPoints() {
@@ -1742,7 +1929,9 @@ public BlockPos getPingMoveTarget() {
     }
     
     public void setSuppressionAimPoints(java.util.List<Vec3> points) {
-        this.suppressionAimPoints = points;
+        // Callers pass immutable lists (List.of(...)); the clear helpers below
+        // mutate this field in place, so store a mutable copy.
+        this.suppressionAimPoints = new java.util.ArrayList<>(points);
         this.lastSuppressionAimPoint = null;
     }
     
@@ -2406,9 +2595,13 @@ public BlockPos getPingMoveTarget() {
 
     public boolean isMovingToUnoccupiedCoverDuringReload() {
         CoverBehaviorManager.CoverState state = coverBehaviorManager.getState();
+        // NO_COVER with a selected target is how findAndMoveToCover hands a fresh
+        // cover to navigation; the approach exception must cover it or a reload
+        // started mid-search rejects every candidate as a fake PATH_FAILED.
         return coverBehaviorManager.getCurrentCover() == null
             && coverBehaviorManager.getTargetCover() != null
             && (state == CoverBehaviorManager.CoverState.SEEKING_COVER
-                || state == CoverBehaviorManager.CoverState.REPOSITIONING);
+                || state == CoverBehaviorManager.CoverState.REPOSITIONING
+                || state == CoverBehaviorManager.CoverState.NO_COVER);
     }
 }

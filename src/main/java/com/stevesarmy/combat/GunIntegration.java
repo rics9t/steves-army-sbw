@@ -1,12 +1,15 @@
 package com.stevesarmy.combat;
 
 import com.stevesarmy.StevesArmyMod;
+import com.stevesarmy.combat.cover.GunBlockImpactHandlerTaCZ;
+import com.stevesarmy.combat.cover.IncomingFireHandlerTaCZ;
 import com.stevesarmy.debug.DiagnosticLogManager;
 import com.stevesarmy.entity.SoldierEntity;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.Vec3;
+import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.common.capabilities.ForgeCapabilities;
 
 import java.lang.reflect.Field;
@@ -63,6 +66,38 @@ public class GunIntegration {
         } else {
             gunHandler = FALLBACK_HANDLER;
         }
+
+        if (taczLoaded) {
+            registerTaCZEventHandlers();
+        }
+    }
+
+    /**
+     * TaCZ event handlers are registered manually instead of through
+     * {@code @EventBusSubscriber}: automatic registration resolves every
+     * handler method's parameter types during mod construction, so a TaCZ
+     * build missing an event class (e.g. 1.1.8-hotfix dropped
+     * AmmoHitBlockEvent) crashes the whole mod load. Each handler is only
+     * registered when its event class is actually present.
+     */
+    private static void registerTaCZEventHandlers() {
+        tryRegisterHandler("com.tacz.guns.api.event.common.GunShootEvent",
+            GunshotDetectionHandlerTaCZ.class);
+        tryRegisterHandler("com.tacz.guns.api.event.common.EntityHurtByGunEvent",
+            IncomingFireHandlerTaCZ.class);
+        tryRegisterHandler("com.tacz.guns.api.event.server.AmmoHitBlockEvent",
+            GunBlockImpactHandlerTaCZ.class);
+    }
+
+    private static void tryRegisterHandler(String eventClassName, Class<?> handlerClass) {
+        try {
+            Class.forName(eventClassName);
+            MinecraftForge.EVENT_BUS.register(handlerClass);
+            StevesArmyMod.LOGGER.info("[TaCZ] Registered {} for {}", handlerClass.getSimpleName(), eventClassName);
+        } catch (Throwable t) {
+            StevesArmyMod.LOGGER.warn("[TaCZ] Skipping {} - event {} unavailable ({})",
+                handlerClass.getSimpleName(), eventClassName, t.toString());
+        }
     }
 
     public static boolean isTaczLoaded() { return taczLoaded; }
@@ -94,7 +129,6 @@ public class GunIntegration {
             return false;
         }
     }
-
     public static GunHandler handlerFor(ItemStack stack) {
         if (stack == null || stack.isEmpty()) return FALLBACK_HANDLER;
         if (sbwLoaded && com.stevesarmy.compat.sbw.SbwCompat.isGun(stack)) {
@@ -143,6 +177,36 @@ public class GunIntegration {
     public static boolean isManualBolt(LivingEntity entity) { return handlerFor(entity).isManualBolt(entity); }
     public static boolean useInventoryAmmo(LivingEntity entity) { return handlerFor(entity).useInventoryAmmo(entity); }
     public static String getGunId(LivingEntity entity) { return handlerFor(entity).getGunId(entity); }
+
+    /**
+     * Gun ID (e.g. {@code tacz:rpg7}) for any gun ItemStack, independent of
+     * what the entity currently holds. Empty string when not a readable gun.
+     */
+    public static String getGunId(ItemStack stack) {
+        if (stack == null || stack.isEmpty()) return "";
+        if (sbwLoaded && com.stevesarmy.compat.sbw.SbwCompat.isGun(stack)) {
+            ResourceLocation rl = net.minecraftforge.registries.ForgeRegistries.ITEMS.getKey(stack.getItem());
+            return rl != null ? rl.toString() : "";
+        }
+        if (vpbLoaded && VpbGunHandler.isVpbGun(stack)) {
+            return VPB_HANDLER.getGunId(stack);
+        }
+        if (taczLoaded && isTaczGun(stack)) {
+            try {
+                Class<?> iGunClass = Class.forName("com.tacz.guns.api.item.IGun");
+                Method getIGunOrNull = iGunClass.getMethod("getIGunOrNull", ItemStack.class);
+                Object iGun = getIGunOrNull.invoke(null, stack);
+                if (iGun == null) return "";
+                Method getGunIdMethod = iGunClass.getMethod("getGunId", ItemStack.class);
+                Object gunId = getGunIdMethod.invoke(iGun, stack);
+                return gunId != null ? gunId.toString() : "";
+            } catch (Exception e) {
+                return "";
+            }
+        }
+        return "";
+    }
+
     public static String getAmmoId(LivingEntity entity) { return handlerFor(entity).getAmmoId(entity); }
     public static int getCurrentAmmo(ItemStack gunStack) { return handlerFor(gunStack).getCurrentAmmo(gunStack); }
     public static String getAmmoId(ItemStack gunStack) { return handlerFor(gunStack).getAmmoId(gunStack); }

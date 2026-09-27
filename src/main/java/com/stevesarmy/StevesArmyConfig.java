@@ -18,12 +18,29 @@ public class StevesArmyConfig {
     public static final ForgeConfigSpec.DoubleValue AIM_QUALITY_SWITCH_RESET;
     public static final ForgeConfigSpec.DoubleValue TARGET_SWITCH_IMPROVEMENT;
     public static final ForgeConfigSpec.IntValue TARGET_REEVALUATE_INTERVAL;
+
+    public static final ForgeConfigSpec.BooleanValue DYNAMIC_FIRING_ENABLED;
+    public static final ForgeConfigSpec.DoubleValue FIRING_PERSONALITY_STRENGTH;
+    public static final ForgeConfigSpec.EnumValue<SuppressedFireMode> SUPPRESSED_FIRE_MODE;
+    public static final ForgeConfigSpec.DoubleValue SUPPRESSION_THRESHOLD_RELIEF;
+    public static final ForgeConfigSpec.DoubleValue SUPPRESSION_THRESHOLD_TIGHTEN;
+    public static final ForgeConfigSpec.DoubleValue SUPPRESSION_SIGMA_SCALE;
+    public static final ForgeConfigSpec.DoubleValue FIRING_FIRETEAM_BLEND;
+    public static final ForgeConfigSpec.DoubleValue FIRING_DUTY_SUPPRESSION_FACTOR;
+    public static final ForgeConfigSpec.DoubleValue FIRING_MISS_STREAK_STEP;
+    public static final ForgeConfigSpec.IntValue FIRING_MISS_STREAK_CAP;
+    public static final ForgeConfigSpec.DoubleValue FIRING_MISS_STREAK_RECOVERY_SCALE;
+    public static final ForgeConfigSpec.IntValue FIRING_MISS_STREAK_DECAY_TICKS;
+
+    /** How a suppressed soldier reacts when returning direct fire. */
+    public enum SuppressedFireMode { SPRAY, HOLD }
     public static final ForgeConfigSpec.BooleanValue SQUAD_FRIENDLY_FIRE;
     public static final ForgeConfigSpec.DoubleValue THREAT_SMOOTH_BLEND_FACTOR;
     public static final ForgeConfigSpec.IntValue THREAT_SMOOTH_DECAY_TIME_MS;
     
     public static final ForgeConfigSpec.BooleanValue TARGET_MONSTERS;
     public static final ForgeConfigSpec.BooleanValue TARGET_TARGET_ENTITIES;
+    public static final ForgeConfigSpec.BooleanValue MONSTERS_ATTACK_SOLDIERS;
     public static final ForgeConfigSpec.DoubleValue BASIC_DETECTION_DISTANCE;
     public static final ForgeConfigSpec.DoubleValue MACHINE_GUNNER_DETECTION_DISTANCE;
 
@@ -56,6 +73,7 @@ public class StevesArmyConfig {
     public static final ForgeConfigSpec.DoubleValue SMOKE_FALL_RATE_MULTIPLIER;
 
     public static final ForgeConfigSpec.BooleanValue VS2_COMPAT_ENABLED;
+    public static final ForgeConfigSpec.BooleanValue VS2_SHIP_RAYCAST_GATE;
     public static final ForgeConfigSpec.BooleanValue SKIN_RANDOMIZE_ON_SPAWN;
     public static final ForgeConfigSpec.BooleanValue VS2_AUTO_TRANSPORT;
     public static final ForgeConfigSpec.IntValue VS2_MAX_TRANSPORTED_SOLDIERS;
@@ -77,6 +95,18 @@ public class StevesArmyConfig {
     public static final ForgeConfigSpec.BooleanValue VEHICLE_HANDLES_ENABLED;
     public static final ForgeConfigSpec.IntValue VEHICLE_HANDLES_DISMOUNT_GRACE;
 
+    public static final ForgeConfigSpec.BooleanValue ARMOR_AWARENESS_ENABLED;
+    public static final ForgeConfigSpec.DoubleValue ARMOR_DETECTION_DISTANCE;
+    public static final ForgeConfigSpec.DoubleValue ARMOR_ENGAGEMENT_MAX_RANGE;
+    public static final ForgeConfigSpec.ConfigValue<java.util.List<? extends String>> ARMOR_AT_GUN_PATTERNS;
+    public static final ForgeConfigSpec.ConfigValue<java.util.List<? extends String>> SIDEARM_GUN_PATTERNS;
+    public static final ForgeConfigSpec.BooleanValue SOLDIER_DEATH_DROPS;
+    public static final ForgeConfigSpec.EnumValue<ArmorDoctrineOverride> ARMOR_DOCTRINE_OVERRIDE;
+    public static final ForgeConfigSpec.BooleanValue OCCUPANCY_VEHICLE_DETECTION;
+    public static final ForgeConfigSpec.BooleanValue SBW_COMPAT_ENABLED;
+
+    public enum ArmorDoctrineOverride { AUTO, NO_AT, FORCE_AT }
+
     public static final ForgeConfigSpec.IntValue OPTIMIZATION_LEVEL;
     public static final ForgeConfigSpec.BooleanValue RETRY_POLICY_ENABLED;
     public static final ForgeConfigSpec.BooleanValue PERCEPTION_FRAME_ENABLED;
@@ -89,6 +119,8 @@ public class StevesArmyConfig {
     public static final ForgeConfigSpec.IntValue ASYNC_PATHFINDING_MAX_PENDING_TICKS;
     public static final ForgeConfigSpec.IntValue EXACT_PATH_VALIDATION_LIMIT;
     public static final ForgeConfigSpec.IntValue COVER_SEARCH_FAILURE_RETRY_TICKS;
+    public static final ForgeConfigSpec.IntValue COVER_SCORING_MAX_CONTACTS;
+    public static final ForgeConfigSpec.IntValue MOVE_GOAL_REPATH_TICKS;
 
     public static final ForgeConfigSpec.BooleanValue FIRETEAM_SUPPRESSION_ENABLED;
     public static final ForgeConfigSpec.DoubleValue FIRETEAM_RISE_RATE;
@@ -180,7 +212,81 @@ public class StevesArmyConfig {
             .comment("Ticks between target re-evaluation. Default 20 (1 second).",
                      "Lower values = more responsive but higher CPU usage.")
             .defineInRange("targetReevaluateInterval", 20, 5, 100);
-        
+
+        BUILDER.pop();
+
+        BUILDER.push("dynamic_firing");
+
+        DYNAMIC_FIRING_ENABLED = BUILDER
+            .comment("Master switch for the dynamic firing gate: per-soldier firing personalities,",
+                     "variable burst lengths/gaps, suppression-driven aim, and the missed-target",
+                     "streak ratchet. When false, firing uses the exact legacy fixed pacing.",
+                     "Default: true")
+            .define("dynamicFiringEnabled", true);
+
+        FIRING_PERSONALITY_STRENGTH = BUILDER
+            .comment("How strongly a soldier's per-engagement personality skews pacing (0.0 to 1.0).",
+                     "0.0 = all soldiers pace identically (legacy), 1.0 = full bias ranges",
+                     "(burst 0.8-1.3x, gap 0.8-1.25x, threshold 0.9-1.1x, cadence 0.9-1.15x, build 0.85-1.2x).",
+                     "Default: 0.6")
+            .defineInRange("personalityStrength", 0.6, 0.0, 1.0);
+
+        SUPPRESSED_FIRE_MODE = BUILDER
+            .comment("Reaction of a pressured/pinned soldier returning direct fire:",
+                     "SPRAY = lowers the aim gate so they shoot back sooner and less accurately.",
+                     "HOLD = raises the aim gate so they stop exposing and button up.",
+                     "Default: SPRAY")
+            .defineEnum("suppressedFireMode", SuppressedFireMode.SPRAY);
+
+        SUPPRESSION_THRESHOLD_RELIEF = BUILDER
+            .comment("SPRAY mode: aim-gate reduction at full suppression (0.0 to 1.0).",
+                     "thresholdScale *= 1 - suppression * relief. Default: 0.35")
+            .defineInRange("suppressionThresholdRelief", 0.35, 0.0, 1.0);
+
+        SUPPRESSION_THRESHOLD_TIGHTEN = BUILDER
+            .comment("HOLD mode: aim-gate increase at full suppression (0.0 to 1.0).",
+                     "thresholdScale *= 1 + suppression * tighten. Default: 0.40")
+            .defineInRange("suppressionThresholdTighten", 0.40, 0.0, 1.0);
+
+        SUPPRESSION_SIGMA_SCALE = BUILDER
+            .comment("How much shot dispersion widens at full suppression (0.0 to 5.0).",
+                     "sigma *= 1 + suppression * scale. Suppressive-discipline duty fire takes a",
+                     "reduced share of the shake. The +-2.5 sigma clamp always applies. Default: 2.0")
+            .defineInRange("suppressionSigmaScale", 2.0, 0.0, 5.0);
+
+        FIRING_FIRETEAM_BLEND = BUILDER
+            .comment("How much fireteam-level suppression feeds the individual's firing state (0.0 to 1.0).",
+                     "effective = max(individual, blend * fireteamLevel). 0.0 = individual only.",
+                     "Default: 0.5")
+            .defineInRange("fireteamBlend", 0.5, 0.0, 1.0);
+
+        FIRING_DUTY_SUPPRESSION_FACTOR = BUILDER
+            .comment("Fraction of the suppression dispersion shake taken while firing under",
+                     "SUPPRESSIVE discipline (0.0 to 1.0) — duty fire accepts the shake as the",
+                     "price of base fire. Default: 0.3")
+            .defineInRange("dutySuppressionFactor", 0.3, 0.0, 1.0);
+
+        FIRING_MISS_STREAK_STEP = BUILDER
+            .comment("Aim-gate increase per ineffective burst on the same target (0.0 to 0.5).",
+                     "A burst is ineffective when the target takes no damage from it. The soldier",
+                     "demands a better firing solution instead of hammering the same shot.",
+                     "Default: 0.12")
+            .defineInRange("missStreakStep", 0.12, 0.0, 0.5);
+
+        FIRING_MISS_STREAK_CAP = BUILDER
+            .comment("Maximum counted ineffective bursts (0 to 8). Default: 4")
+            .defineInRange("missStreakCap", 4, 0, 8);
+
+        FIRING_MISS_STREAK_RECOVERY_SCALE = BUILDER
+            .comment("Extra burst recovery per ineffective burst (0.0 to 2.0): the soldier takes",
+                     "time to re-aim instead of re-engaging instantly. Default: 0.5")
+            .defineInRange("missStreakRecoveryScale", 0.5, 0.0, 2.0);
+
+        FIRING_MISS_STREAK_DECAY_TICKS = BUILDER
+            .comment("Ticks without shooting for one streak step to cool off (20 to 600).",
+                     "Default: 100 (5 seconds per step)")
+            .defineInRange("missStreakDecayTicks", 100, 20, 600);
+
         BUILDER.pop();
         
         BUILDER.push("friendly_fire");
@@ -230,6 +336,13 @@ public class StevesArmyConfig {
                      "Disable for better performance if not using target entities.",
                      "Default: true")
             .define("targetTargetEntities", true);
+
+        MONSTERS_ATTACK_SOLDIERS = BUILDER
+            .comment("Whether vanilla monsters proactively hunt soldiers (Recruits-style).",
+                     "Without it monsters only retaliate after being attacked; with it zombies,",
+                     "skeletons and other monsters actively hunt nearby soldiers.",
+                     "Default: true")
+            .define("monstersAttackSoldiers", true);
 
         BASIC_DETECTION_DISTANCE = BUILDER
             .comment("Focused detection distance for riflemen and enemy soldiers (blocks).",
@@ -403,6 +516,14 @@ BUILDER.pop();
                      "Soldiers avoid VS ship navigation and recover from accidental ship contact.")
             .define("enabled", true);
 
+        VS2_SHIP_RAYCAST_GATE = BUILDER
+            .comment("Gate ship-aware visibility rays: rays whose bounding box meets no ship skip",
+                     "the VS2 clip entirely, and rays that do meet a ship are clipped per ship over",
+                     "just the ship's AABB span instead of the whole ray. Hit results are unchanged;",
+                     "this only removes redundant ray work on VS 2.3, whose clip re-walks the world",
+                     "and every ship in the query box for each ray. Default: true")
+            .define("shipRaycastGate", true);
+
         VS2_AUTO_TRANSPORT = BUILDER
             .comment("Automatically mount nearby FOLLOW soldiers to Create seats on the ship their owner boards.",
                      "Mounted soldiers do not navigate, seek cover, or fight while transported.")
@@ -505,6 +626,82 @@ BUILDER.pop();
 
         BUILDER.pop();
 
+        BUILDER.push("armorDoctrine");
+
+        ARMOR_AWARENESS_ENABLED = BUILDER
+            .comment("Soldiers detect enemy-crewed vehicles as shared hard-target contacts.",
+                     "A launcher carrier may select the launcher and use the ordinary direct",
+                     "combat pipeline against a visible hull surface; vehicle contacts never",
+                     "change cover, peeking, posture, navigation, or rifleman behavior.",
+                     "Vehicles are spotted via crewed tallyho turrets (requires tallyho) or",
+                     "via crewed occupancy (see occupancyVehicleDetection, no tallyho needed).",
+                     "Default: true.")
+            .define("enabled", true);
+
+        ARMOR_DETECTION_DISTANCE = BUILDER
+            .comment("How far a soldier notices an actively crewed enemy vehicle turret.",
+                     "Vehicles are large and loud; detection is instant inside this range.",
+                     "Default: 48 blocks.")
+            .defineInRange("detectionDistance", 48.0, 8.0, 256.0);
+
+        ARMOR_ENGAGEMENT_MAX_RANGE = BUILDER
+            .comment("Maximum range at which the designated armor hunter opens fire on a",
+                     "vehicle. Keep this inside the AT gun's effective range so rockets do",
+                     "not sail past the hull. Default: 96 blocks.")
+            .defineInRange("engagementMaxRange", 96.0, 8.0, 256.0);
+
+        ARMOR_AT_GUN_PATTERNS = BUILDER
+            .comment("Gun-ID substrings that count as anti-armor weapons (TaCZ gun id,",
+                     "e.g. tacz:rpg7). An ANTI-TANK-role soldier carrying any such gun is",
+                     "designated the squad's armor hunter; other soldiers never hunt even",
+                     "if they pick a launcher up. Default: rpg / rocket / launcher.")
+            .defineList("atGunIdPatterns",
+                java.util.List.of("rpg", "rocket", "launcher"),
+                entry -> entry instanceof String);
+
+        SIDEARM_GUN_PATTERNS = BUILDER
+            .comment("Gun-ID substrings that count as sidearm pistols for gun slotting",
+                     "(TaCZ gun id, e.g. tacz:glock_17). Gun slotting puts the main gun in",
+                     "the main hand and a pistol in the sidearm slot. Default: pistol /",
+                     "glock / m1911 / deagle / usp / makarov.")
+            .defineList("sidearmGunIdPatterns",
+                java.util.List.of("pistol", "glock", "m1911", "deagle", "usp", "makarov"),
+                entry -> entry instanceof String);
+
+        SOLDIER_DEATH_DROPS = BUILDER
+            .comment("Soldiers drop their whole inventory inside one supply pouch",
+                     "where they die instead of vanishing with it. Default: true.")
+            .define("soldierDeathDrops", true);
+
+        ARMOR_DOCTRINE_OVERRIDE = BUILDER
+            .comment("Force the reaction branch for testing: AUTO uses each squad's real",
+                     "loadout; NO_AT makes every squad react as if it has no anti-armor",
+                     "weapon; FORCE_AT makes every squad count as having anti-armor support",
+                     "(riflemen will suppress the vehicle even with no hunter designated).",
+                     "Default: AUTO.")
+            .defineEnum("doctrineOverride", ArmorDoctrineOverride.AUTO);
+
+        OCCUPANCY_VEHICLE_DETECTION = BUILDER
+            .comment("Detect ships as enemy vehicles when enemy CREW are aboard: a soldier",
+                     "with the vehicle-crew role, or anyone riding a seat on the hull.",
+                     "Infantry merely standing on a ship or dock never triggers a contact.",
+                     "Works without tallyho. Default: true.")
+            .define("occupancyVehicleDetection", true);
+
+        BUILDER.pop();
+
+        BUILDER.push("superbwarfare");
+
+        SBW_COMPAT_ENABLED = BUILDER
+            .comment("Enable Superb Warfare compatibility when the superbwarfare mod is installed.",
+                     "AT soldiers treat enemy-crewed SBW vehicles as hard targets, and vehicle",
+                     "crew can board and man them via wheel/crew stick/egg (gunnery only -",
+                     "SBW vehicles are client-input driven, so AI cannot drive them).",
+                     "Default: true.")
+            .define("enabled", true);
+
+        BUILDER.pop();
+
         BUILDER.push("skins");
 
         SKIN_RANDOMIZE_ON_SPAWN = BUILDER
@@ -592,6 +789,21 @@ BUILDER.pop();
                      "The cooldown is bypassed when the soldier, threat, objective, relocation, or blacklist context changes.",
                      "Default: 20")
             .defineInRange("coverSearchFailureRetryTicks", 20, 1, 200);
+
+        COVER_SCORING_MAX_CONTACTS = BUILDER
+            .comment("Maximum squad firing contacts traced per cover candidate while scoring cover.",
+                     "Contacts beyond the cap are skipped for scoring only; targeting and peek",
+                     "decisions still use every contact. Each contact is one visibility ray per",
+                     "candidate firing origin, so lower this if cover searches spike the server tick.",
+                     "Default: 6")
+            .defineInRange("coverScoringMaxContacts", 6, 0, 24);
+
+        MOVE_GOAL_REPATH_TICKS = BUILDER
+            .comment("Ticks between hold/defend movement re-paths while the current path is still",
+                     "pending or being walked. Lower values react faster to blocked routes but",
+                     "recompute pathfinding snapshots more often; unreachable targets always back",
+                     "off to 100 ticks regardless. Default: 20")
+            .defineInRange("moveGoalRepathTicks", 20, 4, 100);
 
         BUILDER.pop();
 
@@ -748,7 +960,55 @@ BUILDER.pop();
     public static int getTargetReevaluateInterval() {
         return TARGET_REEVALUATE_INTERVAL.get();
     }
-    
+
+    public static boolean isDynamicFiringEnabled() {
+        return DYNAMIC_FIRING_ENABLED.get();
+    }
+
+    public static float getFiringPersonalityStrength() {
+        return FIRING_PERSONALITY_STRENGTH.get().floatValue();
+    }
+
+    public static SuppressedFireMode getSuppressedFireMode() {
+        return SUPPRESSED_FIRE_MODE.get();
+    }
+
+    public static float getSuppressionThresholdRelief() {
+        return SUPPRESSION_THRESHOLD_RELIEF.get().floatValue();
+    }
+
+    public static float getSuppressionThresholdTighten() {
+        return SUPPRESSION_THRESHOLD_TIGHTEN.get().floatValue();
+    }
+
+    public static float getSuppressionSigmaScale() {
+        return SUPPRESSION_SIGMA_SCALE.get().floatValue();
+    }
+
+    public static float getFiringFireteamBlend() {
+        return FIRING_FIRETEAM_BLEND.get().floatValue();
+    }
+
+    public static float getFiringDutySuppressionFactor() {
+        return FIRING_DUTY_SUPPRESSION_FACTOR.get().floatValue();
+    }
+
+    public static float getFiringMissStreakStep() {
+        return FIRING_MISS_STREAK_STEP.get().floatValue();
+    }
+
+    public static int getFiringMissStreakCap() {
+        return FIRING_MISS_STREAK_CAP.get();
+    }
+
+    public static float getFiringMissStreakRecoveryScale() {
+        return FIRING_MISS_STREAK_RECOVERY_SCALE.get().floatValue();
+    }
+
+    public static int getFiringMissStreakDecayTicks() {
+        return FIRING_MISS_STREAK_DECAY_TICKS.get();
+    }
+
     public static boolean getSquadFriendlyFire() {
         return SQUAD_FRIENDLY_FIRE.get();
     }
@@ -767,6 +1027,10 @@ BUILDER.pop();
     
     public static boolean shouldTargetTargetEntities() {
         return TARGET_TARGET_ENTITIES.get();
+    }
+
+    public static boolean shouldMonstersAttackSoldiers() {
+        return MONSTERS_ATTACK_SOLDIERS.get();
     }
 
     public static double getBasicDetectionDistance() {
@@ -926,6 +1190,10 @@ BUILDER.pop();
         return COVER_SEARCH_FAILURE_RETRY_TICKS.get();
     }
 
+    public static int getMoveGoalRepathTicks() {
+        return MOVE_GOAL_REPATH_TICKS.get();
+    }
+
     public static boolean isFireteamSuppressionEnabled() {
         return FIRETEAM_SUPPRESSION_ENABLED.get();
     }
@@ -1002,6 +1270,38 @@ BUILDER.pop();
         return GROUP_BEHIND_DWELL_MULT.get().floatValue();
     }
 
+
+    public static boolean isArmorAwarenessEnabled() {
+        return ARMOR_AWARENESS_ENABLED.get();
+    }
+
+    public static double getArmorDetectionDistance() {
+        return ARMOR_DETECTION_DISTANCE.get();
+    }
+
+    public static double getArmorEngagementMaxRange() {
+        return ARMOR_ENGAGEMENT_MAX_RANGE.get();
+    }
+
+    public static java.util.List<? extends String> getArmorAtGunPatterns() {
+        return ARMOR_AT_GUN_PATTERNS.get();
+    }
+
+    public static java.util.List<? extends String> getSidearmGunPatterns() {
+        return SIDEARM_GUN_PATTERNS.get();
+    }
+
+    public static boolean isSoldierDeathDropsEnabled() {
+        return SOLDIER_DEATH_DROPS.get();
+    }
+
+    public static ArmorDoctrineOverride getArmorDoctrineOverride() {
+        return ARMOR_DOCTRINE_OVERRIDE.get();
+    }
+
+    public static boolean isOccupancyVehicleDetectionEnabled() {
+        return OCCUPANCY_VEHICLE_DETECTION.get();
+    }
 
     /** Legacy compatibility hook; nearby-target snapshots are disabled. */
     public static int getTargetCandidateCacheTicks() {

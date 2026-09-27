@@ -3,6 +3,7 @@ package com.stevesarmy.transport;
 import com.stevesarmy.StevesArmyConfig;
 import com.stevesarmy.StevesArmyMod;
 import com.stevesarmy.compat.AnalogWarfareCompat;
+import com.stevesarmy.compat.SbwCompat;
 import com.stevesarmy.compat.VS2Compat;
 import com.stevesarmy.combat.StationGunnerAI;
 import com.stevesarmy.entity.SoldierEntity;
@@ -150,6 +151,39 @@ public final class CrewAssignment {
         return seatedCount;
     }
 
+    /**
+     * Seats crew on a plain world-space vehicle entity (Superb Warfare), the
+     * entity analogue of {@link #mountCrewOnShip}: capacity is the vehicle's JSON
+     * seat count, each soldier rides via {@link VS2Compat#seatSoldierOnEntity}
+     * (gunner seats filled before the driver seat). No handle/contraption tiers —
+     * an SBW vehicle has exactly one seating system.
+     *
+     * @return the number of crew seated
+     */
+    public static int mountCrewOnVehicle(ServerLevel level, Entity vehicle,
+                                         List<SoldierEntity> crew) {
+        if (crew.isEmpty() || !SbwCompat.isOperational(vehicle)) {
+            return 0;
+        }
+        int capacity = SbwCompat.maxPassengers(vehicle);
+        int seatedCount = 0;
+        for (SoldierEntity soldier : crew) {
+            if (!SbwCompat.isOperational(vehicle) || vehicle.getPassengers().size() >= capacity) {
+                break;
+            }
+            prepareForMount(soldier);
+            if (VS2Compat.seatSoldierOnEntity(soldier, vehicle, true)) {
+                seatedCount++;
+            }
+        }
+        if (seatedCount < crew.size()) {
+            StevesArmyMod.LOGGER.info("[Crew] {} of {} crew could not be seated on vehicle={} type={}: no free seats",
+                crew.size() - seatedCount, crew.size(), vehicle.getId(),
+                SbwCompat.getVehicleTypeName(vehicle));
+        }
+        return seatedCount;
+    }
+
     /** Seat one crew member on a static SeatBlock via SeatBlock.sitDown (the infantry MOUNT path). */
     private static boolean seatStatic(ServerLevel level, Object ship, SoldierEntity soldier,
                                       BlockPos seatPos) {
@@ -231,7 +265,8 @@ public final class CrewAssignment {
     private static void prepareForMount(SoldierEntity soldier) {
         StationGunnerAI.deactivateForSoldier(soldier);
         if (soldier.isPassenger()) {
-            VS2Compat.releaseTransport(soldier);
+            // No handle exit: the soldier is re-seated immediately by the mount.
+            VS2Compat.releaseTransport(soldier, false);
         }
         soldier.getNavigation().stop();
         soldier.cancelCoverMovement();

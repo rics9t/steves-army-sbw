@@ -1,14 +1,13 @@
 package com.stevesarmy.network;
 
-import com.stevesarmy.StevesArmyConfig;
-import com.stevesarmy.compat.AnalogWarfareCompat;
+import com.stevesarmy.StevesArmyMod;
 import com.stevesarmy.compat.VS2Compat;
 import com.stevesarmy.compat.sbw.SbwCompat;
 import com.stevesarmy.compat.sbw.SbwVehicles;
 import com.stevesarmy.entity.SoldierEntity;
-import com.stevesarmy.StevesArmyMod;
 import com.stevesarmy.squad.FireTeam;
 import com.stevesarmy.squad.SquadTargeting;
+import com.stevesarmy.transport.CrewAssignment;
 import com.stevesarmy.transport.TransportOrder;
 import com.stevesarmy.vehicle.VehicleDriverRegistry;
 import com.stevesarmy.vehicle.VehicleMountPolicy;
@@ -20,10 +19,12 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.EntityHitResult;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.network.NetworkEvent;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Supplier;
 
@@ -82,12 +83,13 @@ public class TransportOrderMessage {
     }
 
     private static void handleMountCrew(ServerPlayer sender, ServerLevel level, Vec3 aimPosition) {
-        if (!VS2Compat.isEnabled()) {
+        if (!VS2Compat.isEnabled() && !SbwCompat.isLoaded()) {
             sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.vs2_unavailable"), true);
             return;
         }
+
         Vec3 searchCenter = aimPosition;
-        Object ship = VS2Compat.getShipAt(level, BlockPos.containing(aimPosition));
+        Object ship = resolveAimedShip(sender, level, aimPosition);
         if (ship == null) {
             searchCenter = sender.position();
             ship = VS2Compat.resolveMountShipNearPlayer(level, sender);
@@ -96,14 +98,17 @@ public class TransportOrderMessage {
             sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.no_vehicle"), true);
             return;
         }
-        List<SoldierEntity> crew = com.stevesarmy.transport.CrewAssignment.stationlessCrewNear(level, sender, searchCenter, 64);
+
+        List<SoldierEntity> crew = CrewAssignment.stationlessCrewNear(level, sender, searchCenter, 64);
         if (crew.isEmpty()) {
             sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.no_crew"), true);
             return;
         }
-        int seated = com.stevesarmy.transport.CrewAssignment.autoAssignNear(sender, level, ship, searchCenter);
+
+        int seated = CrewAssignment.mountCrewOnShip(level, ship, searchCenter, crew);
         StevesArmyMod.LOGGER.info("[Transport] MOUNT_CREW by {}: crew={} seated={}",
             sender.getName().getString(), crew.size(), seated);
+
         sender.displayClientMessage(
             Component.translatable("transport.steves_army.feedback.seated", seated, crew.size()), true);
     }
@@ -113,35 +118,68 @@ public class TransportOrderMessage {
             sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.no_soldiers"), true);
             return;
         }
-        int dismounted = VehicleWreckHandler.dismountAll(soldiers);
 
-        boolean handlesAvailable = StevesArmyConfig.VEHICLE_HANDLES_ENABLED.get()
-            && AnalogWarfareCompat.isAvailable();
-        int handleExits = 0;
+        int dismounted = 0;
+        if (SbwCompat.isLoaded()) {
+            dismounted += VehicleWreckHandler.dismountAll(soldiers);
+        }
+
         for (SoldierEntity soldier : soldiers) {
-            Entity vehicle = soldier.isPassenger() ? soldier.getVehicle() : null;
-            net.minecraft.world.level.block.entity.BlockEntity handle = null;
-            if (handlesAvailable && vehicle != null && soldier.level() instanceof ServerLevel serverLevel) {
-                handle = AnalogWarfareCompat.findHandleForSoldier(serverLevel, soldier);
-            }
+            // releaseTransport exits at the hatch: the handle linked to the soldier's
+            // seat first, then the nearest handle on their ship (no link required).
             if (VS2Compat.releaseTransport(soldier)) {
                 dismounted++;
-                if (handle != null) {
-                    if (AnalogWarfareCompat.teleportSoldierToHandle(soldier, handle)) {
-                        AnalogWarfareCompat.forget(soldier.getUUID());
-                        handleExits++;
-                    }
-                }
             }
         }
-        StevesArmyMod.LOGGER.info("[Transport] DISMOUNT by {}: resolved={} dismounted={} handleExits={}",
-            sender.getName().getString(), soldiers.size(), dismounted, handleExits);
+        StevesArmyMod.LOGGER.info("[Transport] DISMOUNT by {}: resolved={} dismounted={}",
+            sender.getName().getString(), soldiers.size(), dismounted);
+
         if (dismounted == 0) {
             sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.none_mounted"), true);
         } else {
             sender.displayClientMessage(
                 Component.translatable("transport.steves_army.feedback.dismounted", dismounted), true);
         }
+    }
+
+    /** /vs get-ship clips 10 blocks from the crosshair. */
+    private static final double GET_SHIP_PICK_DISTANCE = 10.0;
+
+    /**
+     * Plain-entity vehicle under the crosshair (Superb Warfare): an ENTITY pick
+     * hit on an operational SBW vehicle. Null for every other hit type — ships
+     * keep going through {@link #resolveAimedShip}.
+     */
+    private static Entity resolveAimedVehicle(ServerPlayer sender) {
+        if (!SbwCompat.isLoaded()) {
+            return null;
+        }
+        HitResult clip = sender.pick(GET_SHIP_PICK_DISTANCE, 1.0F, false);
+        if (clip.getType() == HitResult.Type.ENTITY && clip instanceof EntityHitResult entityHit
+            && SbwCompat.isVehicle(entityHit.getEntity()) && !SbwVehicles.isWrecked(entityHit.getEntity())) {
+            return entityHit.getEntity();
+        }
+        return null;
+    }
+
+    /**
+     * Ship resolution in /vs get-ship order (the crew assign stick's order): the
+     * vanilla clip's hit block is the authoritative crosshair pick, so the ship
+     * managing that exact block wins; the geometric resolver only runs when the
+     * hit block maps to nothing — overlapping sub-ships can defeat a raw
+     * block-center lookup. Callers keep their near-player last resort.
+     */
+    private static Object resolveAimedShip(ServerPlayer sender, ServerLevel level, Vec3 aimPosition) {
+        HitResult clip = sender.pick(GET_SHIP_PICK_DISTANCE, 1.0F, false);
+        if (clip.getType() == HitResult.Type.BLOCK && clip instanceof BlockHitResult blockHit) {
+            Object ship = VS2Compat.getShipObjectAtBlockPos(level, blockHit.getBlockPos());
+            if (ship != null) {
+                StevesArmyMod.LOGGER.info("[Transport] ship resolved via vs get-ship at hit block {}: shipId={}",
+                    blockHit.getBlockPos(), VS2Compat.getShipIdOf(ship));
+                return ship;
+            }
+        }
+        return VS2Compat.resolveShipAtWorldAnchor(level, aimPosition);
     }
 
     private static void handleMount(ServerPlayer sender, ServerLevel level,
@@ -159,16 +197,18 @@ public class TransportOrderMessage {
         }
 
         if (SbwCompat.isLoaded()) {
-            Entity targetedVehicle = null;
-            Vec3 eye = sender.getEyePosition();
-            Vec3 look = sender.getViewVector(1.0f);
-            Vec3 end = eye.add(look.scale(64.0));
-            AABB rayBox = sender.getBoundingBox().expandTowards(look.scale(64.0)).inflate(4.0);
-            List<Entity> vehicles = level.getEntitiesOfClass(Entity.class, rayBox, SbwCompat::isVehicle);
-            for (Entity v : vehicles) {
-                if (v.getBoundingBox().inflate(1.5).clip(eye, end).isPresent()) {
-                    targetedVehicle = v;
-                    break;
+            Entity targetedVehicle = resolveAimedVehicle(sender);
+            if (targetedVehicle == null) {
+                Vec3 eye = sender.getEyePosition();
+                Vec3 look = sender.getViewVector(1.0f);
+                Vec3 end = eye.add(look.scale(64.0));
+                AABB rayBox = sender.getBoundingBox().expandTowards(look.scale(64.0)).inflate(4.0);
+                List<Entity> vehicles = level.getEntitiesOfClass(Entity.class, rayBox, SbwCompat::isVehicle);
+                for (Entity v : vehicles) {
+                    if (v.getBoundingBox().inflate(1.5).clip(eye, end).isPresent()) {
+                        targetedVehicle = v;
+                        break;
+                    }
                 }
             }
             if (targetedVehicle == null) {
@@ -205,8 +245,10 @@ public class TransportOrderMessage {
             return;
         }
 
+        // Crosshair ship first (vs get-ship order); otherwise the ship the player
+        // rides, else the nearest ship.
         Vec3 searchCenter = aimPosition;
-        Object ship = VS2Compat.getShipAt(level, BlockPos.containing(aimPosition));
+        Object ship = resolveAimedShip(sender, level, aimPosition);
         if (ship == null) {
             searchCenter = sender.position();
             ship = VS2Compat.resolveMountShipNearPlayer(level, sender);
@@ -216,51 +258,17 @@ public class TransportOrderMessage {
             return;
         }
 
-        List<SoldierEntity> remaining = new ArrayList<>(eligible);
-        int seated = 0;
-        int viaHandles = 0;
+        // Crew soldiers board shipyard seats exactly like riflemen; their crew AI
+        // keeps ticking once seated (crewSeated), so they still man their station.
+        // One shared 4-tier routine — handles → Create contraption seats → static
+        // SeatBlocks → raw seat entities (tallyho) — so the wheel boards whatever
+        // the crew assign stick boards: ships whose only seats are seat entities
+        // have no SeatBlocks for a block scan to find.
+        int seated = CrewAssignment.mountCrewOnShip(level, ship, searchCenter, eligible);
 
-        if (StevesArmyConfig.VEHICLE_HANDLES_ENABLED.get() && AnalogWarfareCompat.isAvailable()) {
-            viaHandles = AnalogWarfareCompat.mountViaHandles(level, ship, searchCenter, remaining);
-            seated += viaHandles;
-        }
+        StevesArmyMod.LOGGER.info("[Transport] MOUNT by {}: eligible={} seated={}",
+            sender.getName().getString(), eligible.size(), seated);
 
-        if (!remaining.isEmpty()) {
-            List<BlockPos> seats = VS2Compat.findFreeStaticSeats(level, ship, searchCenter, remaining.size());
-            for (SoldierEntity soldier : remaining) {
-                if (seats.isEmpty()) {
-                    break;
-                }
-                soldier.getNavigation().stop();
-                soldier.cancelCoverMovement();
-                soldier.setDeltaMovement(Vec3.ZERO);
-                if (VS2Compat.seatSoldierDirect(soldier, level, seats.get(0))) {
-                    seats.remove(0);
-                    seated++;
-                }
-            }
-        }
-
-        if (!remaining.isEmpty()) {
-            Long shipId = VS2Compat.getShipIdOf(ship);
-            if (shipId != null) {
-                for (SoldierEntity soldier : new ArrayList<>(remaining)) {
-                    Entity freeSeat = VS2Compat.findFreeSeatEntityNear(soldier, 16.0);
-                    if (freeSeat != null) {
-                        soldier.getNavigation().stop();
-                        soldier.cancelCoverMovement();
-                        soldier.setDeltaMovement(Vec3.ZERO);
-                        if (VS2Compat.seatSoldierOnSeatEntity(soldier, freeSeat)) {
-                            remaining.remove(soldier);
-                            seated++;
-                        }
-                    }
-                }
-            }
-        }
-
-        StevesArmyMod.LOGGER.info("[Transport] MOUNT by {}: eligible={} seated={} (viaHandles={}, viaFallback={})",
-            sender.getName().getString(), eligible.size(), seated, viaHandles, seated - viaHandles);
         if (seated == 0) {
             sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.no_free_seats"), true);
         } else {
