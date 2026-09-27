@@ -19,15 +19,24 @@ public final class SbwVehicles {
     private SbwVehicles() {
     }
 
+    // -- drone exclusion ------------------------------------------------------
+
+    public static boolean isDrone(Entity entity) {
+        if (entity == null) return false;
+        String name = entity.getClass().getName();
+        return name.contains("DroneEntity") || name.contains(".drone.") || name.endsWith(".DroneEntity");
+    }
+
     // -- capacity and seating -------------------------------------------------
 
     public static int maxPassengers(Entity vehicle) {
+        if (isDrone(vehicle)) return 0;
         return SbwReflection.asInt(
             SbwReflection.get(vehicle, "maxPassengers", "getMaxPassengers"), 0);
     }
 
     public static int freeSeats(Entity vehicle) {
-        if (!SbwCompat.isVehicle(vehicle)) return 0;
+        if (!SbwCompat.isVehicle(vehicle) || isDrone(vehicle)) return 0;
         return Math.max(0, maxPassengers(vehicle) - vehicle.getPassengers().size());
     }
 
@@ -36,11 +45,13 @@ public final class SbwVehicles {
     }
 
     public static int seatIndexOf(Entity vehicle, Entity passenger) {
+        if (isDrone(vehicle)) return -1;
         return SbwReflection.asInt(
             SbwReflection.call(vehicle, new String[]{"getSeatIndex"}, passenger), -1);
     }
 
     public static Entity passengerAt(Entity vehicle, int index) {
+        if (isDrone(vehicle)) return null;
         Object o = SbwReflection.call(vehicle, new String[]{"getNthEntity"}, index);
         return o instanceof Entity e ? e : null;
     }
@@ -55,6 +66,7 @@ public final class SbwVehicles {
     }
 
     private static Object seatInfo(Entity vehicle, int seatIndex) {
+        if (isDrone(vehicle)) return null;
         return SbwReflection.call(vehicle, new String[]{"getSeat"}, seatIndex);
     }
 
@@ -90,6 +102,7 @@ public final class SbwVehicles {
     }
 
     public static String getGunName(Entity vehicle, int seatIndex) {
+        if (isDrone(vehicle)) return null;
         Object res = SbwReflection.call(vehicle, new String[]{"getGunName"}, seatIndex);
         return res instanceof String s ? s : null;
     }
@@ -113,7 +126,7 @@ public final class SbwVehicles {
 
     /** Ensure the vehicle has sufficient energy to drive and operate systems. */
     public static void ensureFuel(Entity vehicle) {
-        if (!SbwCompat.isVehicle(vehicle)) return;
+        if (!SbwCompat.isVehicle(vehicle) || isDrone(vehicle)) return;
         Object energyObj = SbwReflection.get(vehicle, "energy", "getEnergy");
         int energy = SbwReflection.asInt(energyObj, 0);
         Object maxEnergyObj = SbwReflection.get(vehicle, "maxEnergy", "getMaxEnergy");
@@ -128,12 +141,14 @@ public final class SbwVehicles {
     }
 
     public static void setPower(Entity vehicle, float p) {
+        if (isDrone(vehicle)) return;
         SbwReflection.set(vehicle, p, "power");
     }
 
     // -- driving inputs -------------------------------------------------------
 
     public static void input(Entity vehicle, String name, boolean down) {
+        if (isDrone(vehicle)) return;
         SbwReflection.set(vehicle, down, name);
     }
 
@@ -170,7 +185,7 @@ public final class SbwVehicles {
     }
 
     public static void updateInputs(Entity vehicle, boolean forward, boolean back, boolean left, boolean right, boolean sprint) {
-        if (!SbwCompat.isVehicle(vehicle)) return;
+        if (!SbwCompat.isVehicle(vehicle) || isDrone(vehicle)) return;
         short keys = 0;
         if (left) keys |= 0b00000001;
         if (right) keys |= 0b00000010;
@@ -187,6 +202,7 @@ public final class SbwVehicles {
     }
 
     public static void clearInputs(Entity vehicle) {
+        if (isDrone(vehicle)) return;
         updateInputs(vehicle, false, false, false, false, false);
         up(vehicle, false);
         down(vehicle, false);
@@ -196,22 +212,25 @@ public final class SbwVehicles {
     // -- weapon stations ------------------------------------------------------
 
     public static int ammoCount(Entity vehicle, int seatIndex) {
+        if (isDrone(vehicle)) return 0;
         return SbwReflection.asInt(
             SbwReflection.call(vehicle, new String[]{"getAmmoCount"}, seatIndex), 0);
     }
 
     public static int weaponHeat(Entity vehicle, int seatIndex) {
+        if (isDrone(vehicle)) return 0;
         return SbwReflection.asInt(
             SbwReflection.call(vehicle, new String[]{"getWeaponHeat"}, seatIndex), 0);
     }
 
     public static Vec3 shootPos(Entity vehicle, int seatIndex) {
+        if (isDrone(vehicle)) return vehicle.position();
         Object res = SbwReflection.call(vehicle, new String[]{"getShootPos"}, seatIndex, 1.0f);
         return res instanceof Vec3 v ? v : vehicle.position();
     }
 
     public static void aimWeapon(Entity vehicle, int seatIndex, Vec3 aimVec) {
-        if (!SbwCompat.isVehicle(vehicle) || aimVec == null) return;
+        if (!SbwCompat.isVehicle(vehicle) || isDrone(vehicle) || aimVec == null) return;
         Class<?> utilsClass = SbwReflection.cls("com.atsuishio.superbwarfare.entity.vehicle.utils.VehicleWeaponUtils");
         if (utilsClass == null) return;
         int turretIdx = SbwReflection.asInt(SbwReflection.get(vehicle, "turretControllerIndex", "getTurretControllerIndex"), 0);
@@ -225,7 +244,7 @@ public final class SbwVehicles {
     }
 
     public static boolean shoot(Entity vehicle, LivingEntity gunner, UUID targetId, Vec3 targetPos) {
-        if (vehicle == null || gunner == null || targetPos == null) return false;
+        if (vehicle == null || isDrone(vehicle) || gunner == null || targetPos == null) return false;
         int seatIndex = seatIndexOf(vehicle, gunner);
         String weaponName = getGunName(vehicle, seatIndex);
         if (weaponName == null) return false;
@@ -262,7 +281,7 @@ public final class SbwVehicles {
     public enum Kind { GROUND, TRACKED, BOAT, HELICOPTER, AIRCRAFT, STATIC, UNKNOWN }
 
     public static Kind kind(Entity vehicle) {
-        if (!SbwCompat.isVehicle(vehicle)) return Kind.UNKNOWN;
+        if (!SbwCompat.isVehicle(vehicle) || isDrone(vehicle)) return Kind.UNKNOWN;
         String n = vehicle.getClass().getName().toLowerCase(java.util.Locale.ROOT);
         if (n.contains("artillery") || n.contains("mortar") || n.contains("tower")
             || n.contains("annihilator") || n.contains("laser")) {
@@ -270,7 +289,7 @@ public final class SbwVehicles {
         }
         if (n.contains("boat") || n.contains("ship")) return Kind.BOAT;
         if (n.contains("heli") || n.contains("ah6") || n.contains("mi28")
-            || n.contains("ghast") || n.contains("drone")) {
+            || n.contains("ghast")) {
             return Kind.HELICOPTER;
         }
         if (n.contains("a10") || n.contains("ju87") || n.contains("j16")
@@ -291,6 +310,7 @@ public final class SbwVehicles {
     }
 
     public static boolean canDrive(Entity vehicle) {
+        if (isDrone(vehicle)) return false;
         Kind k = kind(vehicle);
         return k != Kind.STATIC && k != Kind.UNKNOWN;
     }

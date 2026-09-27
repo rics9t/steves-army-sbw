@@ -35,7 +35,7 @@ public final class VehicleBoardingManager {
         if (!(event.getEntityMounting() instanceof ServerPlayer player)) return;
 
         Entity vehicle = event.getEntityBeingMounted();
-        if (!SbwCompat.isVehicle(vehicle)) return;
+        if (!SbwCompat.isVehicle(vehicle) || SbwVehicles.isDrone(vehicle)) return;
         if (!(player.level() instanceof ServerLevel level)) return;
 
         level.getServer().tell(new net.minecraft.server.TickTask(
@@ -46,6 +46,7 @@ public final class VehicleBoardingManager {
     }
 
     public static void fillSeats(ServerLevel level, Player owner, Entity vehicle) {
+        if (SbwVehicles.isDrone(vehicle)) return;
         List<SoldierEntity> candidates = nearbyOwned(level, owner, RECRUIT_RADIUS);
         if (candidates.isEmpty()) return;
 
@@ -105,7 +106,7 @@ public final class VehicleBoardingManager {
         LivingEntity owner = soldier.getOwner();
         if (owner == null) return;
         Entity ownerVehicle = owner.getVehicle();
-        if (!SbwCompat.isVehicle(ownerVehicle)) return;
+        if (!SbwCompat.isVehicle(ownerVehicle) || SbwVehicles.isDrone(ownerVehicle)) return;
         if (soldier.tickCount % 20 != 0) return;
 
         if (SbwVehicles.hasFreeSeat(ownerVehicle)) {
@@ -140,7 +141,7 @@ public final class VehicleBoardingManager {
     public static List<Entity> usableVehiclesNear(ServerLevel level, Entity anchor, double radius) {
         List<Entity> out = new ArrayList<>();
         for (Entity e : level.getEntities(anchor, anchor.getBoundingBox().inflate(radius))) {
-            if (!SbwCompat.isVehicle(e)) continue;
+            if (!SbwCompat.isVehicle(e) || SbwVehicles.isDrone(e)) continue;
             if (SbwVehicles.isWrecked(e)) continue;
             if (!SbwVehicles.canDrive(e)) continue;
             if (!SbwVehicles.hasFreeSeat(e)) continue;

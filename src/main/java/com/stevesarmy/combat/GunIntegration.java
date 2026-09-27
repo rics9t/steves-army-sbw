@@ -812,6 +812,14 @@ public class GunIntegration {
                 Method getIGunOrNull = iGunClass.getMethod("getIGunOrNull", ItemStack.class);
                 Object iGun = getIGunOrNull.invoke(null, gunStack);
                 if (iGun == null) return 30;
+
+                try {
+                    Method getMaxAmmo = iGunClass.getMethod("getMaxAmmoCount", ItemStack.class);
+                    Object max = getMaxAmmo.invoke(iGun, gunStack);
+                    if (max instanceof Number num && num.intValue() > 0) {
+                        return num.intValue();
+                    }
+                } catch (NoSuchMethodException ignored) {}
                 
                 Method getGunId = iGunClass.getMethod("getGunId", ItemStack.class);
                 Object gunId = getGunId.invoke(iGun, gunStack);
@@ -1036,6 +1044,29 @@ public class GunIntegration {
         @Override
         public float[] getGunRecoil(LivingEntity entity) {
             try {
+                Class<?> gunOperatorClass = Class.forName("com.tacz.guns.api.entity.IGunOperator");
+                Method fromLivingEntity = gunOperatorClass.getMethod("fromLivingEntity", LivingEntity.class);
+                Object gunOperator = fromLivingEntity.invoke(null, entity);
+                Method getCacheProperty = gunOperatorClass.getMethod("getCacheProperty");
+                Object cacheProperty = getCacheProperty.invoke(gunOperator);
+                Method getCache = cacheProperty.getClass().getMethod("getCache", String.class);
+                Object cachedRecoil = getCache.invoke(cacheProperty, "recoil");
+
+                if (cachedRecoil != null) {
+                    try {
+                        Method getPitch = cachedRecoil.getClass().getMethod("getPitch");
+                        Object[] pitchFrames = (Object[]) getPitch.invoke(cachedRecoil);
+                        Method getYaw = cachedRecoil.getClass().getMethod("getYaw");
+                        Object[] yawFrames = (Object[]) getYaw.invoke(cachedRecoil);
+                        Method getValue = pitchFrames[0].getClass().getMethod("getValue");
+                        float[] pitchValues = (float[]) getValue.invoke(pitchFrames[0]);
+                        float[] yawValues = (float[]) getValue.invoke(yawFrames[0]);
+                        float vertical = Math.abs(pitchValues.length > 0 ? pitchValues[0] : 0);
+                        float horizontal = Math.abs(yawValues.length > 0 ? yawValues[0] : 0);
+                        return new float[]{vertical, horizontal};
+                    } catch (Throwable ignored) {}
+                }
+
                 ItemStack gunStack = entity.getMainHandItem();
                 Class<?> iGunClass = Class.forName("com.tacz.guns.api.item.IGun");
                 Method getIGunOrNull = iGunClass.getMethod("getIGunOrNull", ItemStack.class);
@@ -1081,6 +1112,17 @@ public class GunIntegration {
         @Override
         public int getRPM(LivingEntity entity) {
             try {
+                Class<?> gunOperatorClass = Class.forName("com.tacz.guns.api.entity.IGunOperator");
+                Method fromLivingEntity = gunOperatorClass.getMethod("fromLivingEntity", LivingEntity.class);
+                Object gunOperator = fromLivingEntity.invoke(null, entity);
+                Method getCacheProperty = gunOperatorClass.getMethod("getCacheProperty");
+                Object cacheProperty = getCacheProperty.invoke(gunOperator);
+                Method getCache = cacheProperty.getClass().getMethod("getCache", String.class);
+                Object cachedRpm = getCache.invoke(cacheProperty, "rpm");
+                if (cachedRpm instanceof Number num && num.intValue() > 0) {
+                    return num.intValue();
+                }
+
                 ItemStack gunStack = entity.getMainHandItem();
                 Class<?> iGunClass = Class.forName("com.tacz.guns.api.item.IGun");
                 Method getIGunOrNull = iGunClass.getMethod("getIGunOrNull", ItemStack.class);
@@ -1146,6 +1188,17 @@ public class GunIntegration {
         @Override
         public float getAimInaccuracy(LivingEntity entity) {
             try {
+                Class<?> gunOperatorClass = Class.forName("com.tacz.guns.api.entity.IGunOperator");
+                Method fromLivingEntity = gunOperatorClass.getMethod("fromLivingEntity", LivingEntity.class);
+                Object gunOperator = fromLivingEntity.invoke(null, entity);
+                Method getCacheProperty = gunOperatorClass.getMethod("getCacheProperty");
+                Object cacheProperty = getCacheProperty.invoke(gunOperator);
+                Method getCache = cacheProperty.getClass().getMethod("getCache", String.class);
+                Object cachedInaccuracy = getCache.invoke(cacheProperty, "inaccuracy");
+                if (cachedInaccuracy instanceof Number num) {
+                    return num.floatValue();
+                }
+
                 ItemStack gunStack = entity.getMainHandItem();
                 Class<?> iGunClass = Class.forName("com.tacz.guns.api.item.IGun");
                 Method getIGunOrNull = iGunClass.getMethod("getIGunOrNull", ItemStack.class);

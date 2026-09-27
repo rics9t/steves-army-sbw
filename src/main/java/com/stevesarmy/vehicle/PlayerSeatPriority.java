@@ -25,7 +25,7 @@ public final class PlayerSeatPriority {
         if (player.isPassenger() || player.isShiftKeyDown()) return;
 
         Entity vehicle = event.getTarget();
-        if (!SbwCompat.isVehicle(vehicle) || SbwVehicles.isWrecked(vehicle)) return;
+        if (!SbwCompat.isVehicle(vehicle) || SbwVehicles.isWrecked(vehicle) || SbwVehicles.isDrone(vehicle)) return;
 
         Entity driver = SbwVehicles.driver(vehicle);
         if (driver != null && !(driver instanceof SoldierEntity)) return;

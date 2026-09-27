@@ -109,7 +109,7 @@ public class SoldierCombatGoal extends Goal implements CombatGoalController {
     private static final double SUPPRESSION_MAX_RANGE = 128.0;
     private static final int SUPPRESSION_ACTIVE_FIRE_TICKS = 120;
     private static final int SUPPRESSION_PREPARATION_TICKS = 20;
-    private static final double SUPPRESSION_LOS_TOLERANCE = 2.0;
+    private static final double SUPPRESSION_LOS_TOLERANCE = 2.0; // blocks
     private static final float PRONE_FIRING_ARC_DEGREES = 30.0f;
     private static final float FIRING_ALIGNMENT_DEGREES = 7.0f;
     private static final float TURN_RATE_DEGREES = 30.0f;
@@ -127,6 +127,7 @@ public class SoldierCombatGoal extends Goal implements CombatGoalController {
 
     private EngagementPostureState engagementPostureState = EngagementPostureState.READY;
 
+    // Firing-prone is a temporary combat stance, separate from cover crawling.
     private static final int FIRING_PRONE_EVALUATION_INTERVAL = 10;
     private static final int FIRING_PRONE_DELAY_MIN_TICKS = 30;
     private static final int FIRING_PRONE_DELAY_MAX_TICKS = 70;
@@ -153,8 +154,10 @@ public class SoldierCombatGoal extends Goal implements CombatGoalController {
     private int firingProneCommitUntilTick = -1;
     private float firingPronePreference;
     private float firingProneEngagementJitter;
+    // Retains the useful range contribution while a selected lane waits for its next target.
     private float firingProneLastRangeScore;
     private int lastFiringProneTick = -1;
+    // CoverTacticalGoal owns selection and movement; combat only owns posture/aim.
     private boolean firingPronePositionAuthorized;
     
     private boolean isPingSuppressing = false;
@@ -163,8 +166,8 @@ public class SoldierCombatGoal extends Goal implements CombatGoalController {
     private Vec3 pingSuppressionTarget = null;
     private Vec3 pingSuppressionSweepEnd = null;
     private Vec3 pingSuppressionShotTarget = null;
-    private static final int PING_SUPPRESS_MIN_DURATION_TICKS = 80;
-    private static final int PING_SUPPRESS_MAX_DURATION_TICKS = 200;
+    private static final int PING_SUPPRESS_MIN_DURATION_TICKS = 80; // 4 seconds
+    private static final int PING_SUPPRESS_MAX_DURATION_TICKS = 200; // 10 seconds
     
     private List<LivingEntity> cachedPotentialTargets = null;
     private long cachedPotentialTargetsTick = -1;
@@ -199,6 +202,7 @@ public class SoldierCombatGoal extends Goal implements CombatGoalController {
     private int ticksSinceLastBurstShot = 0;
     private boolean burstWaitingForBolt = false;
 
+    // Direct fire must not share state with a last-known-position fire plan.
     private boolean directBurstActive = false;
     private int directBurstShotsFired = 0;
     private int directBurstCooldownTicks = 0;
@@ -237,6 +241,8 @@ public class SoldierCombatGoal extends Goal implements CombatGoalController {
     @Override
     public boolean canUse() {
         if (!soldier.isAlive() || soldier.isHealing()) return false;
+        // A crew soldier manning a hull MG fights through the mounted gun, not
+        // its rifle; posted-but-idle crew holds position for the next station.
         if (soldier.isVehicleCrewActive() || soldier.getRole() == SoldierRole.VEHICLE_CREW) return false;
 
         if (soldier.hasValidPingThreatPos() || soldier.hasValidPingSuppressPos()) {
@@ -260,6 +266,8 @@ public class SoldierCombatGoal extends Goal implements CombatGoalController {
         if (!soldier.isAlive() || soldier.isHealing()) return false;
         if (soldier.isVehicleCrewActive() || soldier.getRole() == SoldierRole.VEHICLE_CREW) return false;
 
+        // A valid fire plan must keep this goal alive even after its original
+        // entity has left the local target list.
         if (isSuppressing) {
             return true;
         }
@@ -403,7 +411,8 @@ public class SoldierCombatGoal extends Goal implements CombatGoalController {
         } else {
             detectionSystem.advanceWithoutScan(soldier.level().getGameTime());
         }
-
+        
+        // Feed detected entities into ThreatAwareness using the scan result
         ThreatAwareness threats = soldier.getThreatAwareness();
         for (LivingEntity potential : potentialTargets) {
             boolean hasLineOfSight = false;
@@ -414,6 +423,7 @@ public class SoldierCombatGoal extends Goal implements CombatGoalController {
                     hasLineOfSight = obs.get().visible();
                     isDetected = obs.get().detected();
                 } else {
+                    // Candidate was filtered by isValidTarget or was duplicate
                     hasLineOfSight = TargetAcquisition.isValidTarget(soldier, potential)
                         && detectionSystem.wasTargetInLOS(potential);
                     isDetected = detectionSystem.isTargetDetected(potential);
@@ -435,6 +445,7 @@ public class SoldierCombatGoal extends Goal implements CombatGoalController {
                 EnemyContactTracker.reportContact(soldier, potential);
             }
         }
+        // Feed ping threat positions into ThreatAwareness if no entity found
         if (soldier.hasValidPingThreatPos() && !threats.hasActiveThreat()) {
             BlockPos threatPos = soldier.getPingThreatPos();
         }
@@ -450,6 +461,9 @@ public class SoldierCombatGoal extends Goal implements CombatGoalController {
 
         maintainSuppressionAssignment();
 
+        // Last-seen suppression must yield to a real visible target immediately,
+        // including while the soldier is exposed from cover. Use a fresh scan so
+        // newly in-range enemies are not delayed by the normal target cache.
         if (isSuppressing) {
             preemptSuppressionForVisibleTarget();
         }

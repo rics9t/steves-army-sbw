@@ -35,7 +35,7 @@ public final class VehicleMountPolicy {
     public static boolean isAuthorized(SoldierEntity soldier, Entity vehicle) {
         if (soldier == null || vehicle == null) return false;
 
-        if (SbwCompat.isVehicle(vehicle)) {
+        if (SbwCompat.isVehicle(vehicle) && !SbwVehicles.isDrone(vehicle)) {
             return true;
         }
 
@@ -49,7 +49,7 @@ public final class VehicleMountPolicy {
 
     public static boolean canBoard(SoldierEntity soldier, Entity vehicle) {
         if (soldier == null || vehicle == null || !soldier.isAlive()) return false;
-        if (!SbwCompat.isVehicle(vehicle)) return false;
+        if (!SbwCompat.isVehicle(vehicle) || SbwVehicles.isDrone(vehicle)) return false;
         if (SbwVehicles.isWrecked(vehicle)) return false;
         if (soldier.isPassenger()) return false;
         return SbwVehicles.hasFreeSeat(vehicle);

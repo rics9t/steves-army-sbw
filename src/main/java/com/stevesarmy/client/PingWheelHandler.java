@@ -48,6 +48,7 @@ public class PingWheelHandler {
 
         boolean isKeyDown = KeyBindings.isPingWheelKeyDown();
 
+        // Skip if Ctrl is held and fire team wheel is enabled (it takes priority)
         long window = mc.getWindow().getWindow();
         boolean ctrlHeld = GLFW.glfwGetKey(window, GLFW.GLFW_KEY_LEFT_CONTROL) == GLFW.GLFW_PRESS
             || GLFW.glfwGetKey(window, GLFW.GLFW_KEY_RIGHT_CONTROL) == GLFW.GLFW_PRESS;
@@ -77,6 +78,9 @@ public class PingWheelHandler {
         if (!isKeyDown && wasKeyDown && isWheelActive) {
             long holdTime = System.currentTimeMillis() - pressStartTime;
 
+            // grabMouse() below recenters the cursor, so the vehicle-page hover must be
+            // captured before the mouse is re-grabbed; the ping path uses the type that
+            // the renderer cached while the wheel was open.
             TransportOrder vehicleAction = WheelCycleController.isVehiclePage()
                 ? VehicleWheelHandler.getHoveredAction() : null;
 
@@ -219,7 +223,11 @@ public class PingWheelHandler {
         }
         return eyePos.add(lookVec.scale(maxDistance));
     }
-
+    
+    /**
+     * Continues through glass and non-colliding vegetation, but retains thin
+     * collidable blocks such as fences and rails as valid ping targets.
+     */
     private static BlockHitResult clipPingTarget(LocalPlayer player, Vec3 start, Vec3 end, Vec3 direction) {
         Vec3 rayStart = start;
         for (int ignoredBlocks = 0; ignoredBlocks < 64; ignoredBlocks++) {

@@ -34,6 +34,7 @@ public class EnemySoldierRenderer extends HumanoidMobRenderer<EnemySoldierEntity
             new HumanoidModel<>(context.bakeLayer(ModelLayers.PLAYER_INNER_ARMOR)),
             new HumanoidModel<>(context.bakeLayer(ModelLayers.PLAYER_OUTER_ARMOR)),
             context.getModelManager()));
+        // Vanilla glow outline via MobEffects.GLOWING + team color handles enemy glow
     }
 
     @Override

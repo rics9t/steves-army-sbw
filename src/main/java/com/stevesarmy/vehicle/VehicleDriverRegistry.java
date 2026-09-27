@@ -22,7 +22,7 @@ public final class VehicleDriverRegistry {
 
     public static void onBoarded(SoldierEntity soldier, Entity vehicle) {
         if (vehicle == null || soldier == null) return;
-        if (!SbwCompat.isVehicle(vehicle)) return;
+        if (!SbwCompat.isVehicle(vehicle) || SbwVehicles.isDrone(vehicle)) return;
         if (vehicle.level().isClientSide) return;
 
         if (!SbwVehicles.isDriver(vehicle, soldier)) return;
@@ -39,7 +39,7 @@ public final class VehicleDriverRegistry {
     }
 
     public static VehicleDriver getOrCreate(Entity vehicle) {
-        if (vehicle == null || !SbwCompat.isVehicle(vehicle)) return null;
+        if (vehicle == null || !SbwCompat.isVehicle(vehicle) || SbwVehicles.isDrone(vehicle)) return null;
         return DRIVERS.computeIfAbsent(vehicle.getUUID(), k -> new VehicleDriver(vehicle));
     }
 
@@ -79,7 +79,7 @@ public final class VehicleDriverRegistry {
     public static Entity vehicleOf(SoldierEntity soldier) {
         if (soldier == null || !soldier.isPassenger()) return null;
         Entity ride = soldier.getVehicle();
-        return SbwCompat.isVehicle(ride) ? ride : null;
+        return (SbwCompat.isVehicle(ride) && !SbwVehicles.isDrone(ride)) ? ride : null;
     }
 
     public static void clearAll() {
