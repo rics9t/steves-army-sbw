@@ -4,6 +4,7 @@ import com.stevesarmy.compat.VS2Compat;
 import com.stevesarmy.compat.sbw.SbwCompat;
 import com.stevesarmy.compat.sbw.SbwVehicles;
 import com.stevesarmy.entity.SoldierEntity;
+import com.stevesarmy.entity.SoldierRole;
 import net.minecraft.world.entity.Entity;
 
 import java.util.Map;
@@ -61,6 +62,10 @@ public final class VehicleMountPolicy {
         boolean ok = soldier.startRiding(vehicle, true);
         if (!ok) {
             revoke(soldier);
+        } else if (soldier.getRole() != SoldierRole.VEHICLE_CREW) {
+            // A taxi rider's previous infantry target must not become a vehicle
+            // gunner target while the soldier's usual combat AI is frozen.
+            soldier.setTarget(null);
         }
         return ok;
     }

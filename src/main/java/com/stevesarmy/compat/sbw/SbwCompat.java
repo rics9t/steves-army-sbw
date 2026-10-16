@@ -36,7 +36,7 @@ public final class SbwCompat {
     }
 
     public static boolean hasVehicles() {
-        return loaded;
+        return loaded && com.stevesarmy.compat.SbwCompat.isEnabled();
     }
 
     public static boolean isGun(ItemStack stack) {
@@ -61,7 +61,7 @@ public final class SbwCompat {
     }
 
     public static void tickVehicle(SoldierEntity soldier) {
-        if (!loaded || soldier == null || soldier.level().isClientSide) return;
+        if (!hasVehicles() || soldier == null || soldier.level().isClientSide) return;
         Entity vehicle = soldier.getVehicle();
         if (isVehicle(vehicle)) {
             if (SbwVehicles.isDriver(vehicle, soldier)) {

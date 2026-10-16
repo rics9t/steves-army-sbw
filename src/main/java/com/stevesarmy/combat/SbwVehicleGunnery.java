@@ -3,6 +3,7 @@ package com.stevesarmy.combat;
 import com.stevesarmy.StevesArmyConfig;
 import com.stevesarmy.compat.SbwCompat;
 import com.stevesarmy.entity.SoldierEntity;
+import com.stevesarmy.entity.SoldierRole;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
@@ -14,14 +15,15 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Spotter AI for soldiers mounted on Superb Warfare vehicles. While a soldier is
+ * Spotter AI for dedicated vehicle crew mounted on Superb Warfare vehicles. While a soldier is
  * a passenger, {@code VS2Compat.prepareSoldierAi} freezes its goal system — but
  * SBW's native mob-crew gunnery fires the vehicle's turret and seat weapons at
  * whatever LivingEntity the riding Mob targets ({@code setTarget} is mirrored
  * into the vehicle's {@code aiTurretTargetUUID} and auto-fired at the weapon's
  * RPM with ballistic lead). This ticker therefore keeps exactly one thing alive
- * while the soldier's own AI is frozen: target acquisition. No movement, no
- * cover, no firing of our own — the soldier is a pure spotter; SBW shoots.
+ * while the crew member's own AI is frozen: target acquisition. No movement,
+ * no cover, no firing of our own — the crew member is a pure spotter; SBW shoots.
+ * Ordinary infantry stay passive as vehicle passengers.
  *
  * <p>Called from the frozen-AI branch in {@code SoldierEntity.customServerAiStep},
  * the same structural pattern as {@link StationGunnerAI} (station AI runs outside
@@ -37,6 +39,9 @@ public final class SbwVehicleGunnery {
 
     /** Safe to call every tick from the frozen-AI branch; throttled and self-gating. */
     public static void tickMounted(SoldierEntity soldier) {
+        if (soldier.getRole() != SoldierRole.VEHICLE_CREW) {
+            return;
+        }
         if (!(soldier.level() instanceof ServerLevel serverLevel)) {
             return;
         }

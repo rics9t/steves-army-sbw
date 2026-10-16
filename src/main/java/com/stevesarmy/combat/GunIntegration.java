@@ -27,6 +27,34 @@ public class GunIntegration {
     private static GunHandler sbwHandler = null;
     private static GunHandler gunHandler = FALLBACK_HANDLER;
 
+    /**
+     * Sim-harness-only override (see sim/SimGunHandler). Takes precedence over
+     * the mod-selected handler so headless runs can fight without TaCZ; null
+     * (the default, and after uninstall) restores the normal routing.
+     */
+    private static volatile GunHandler simHandler;
+
+    public static void installSimGunHandler(GunHandler handler) { simHandler = handler; }
+    public static void uninstallSimGunHandler() { simHandler = null; }
+    public static boolean isSimGunsArmed() { return simHandler != null; }
+
+    private static GunHandler handler() {
+        GunHandler active = simHandler;
+        return active != null ? active : gunHandler;
+    }
+
+    /** Observes shots fired through this facade; used by the headless sim renderer. */
+    public interface ShotListener {
+        void onShot(LivingEntity shooter, Vec3 aimPoint);
+    }
+
+    public static volatile ShotListener shotListener;
+
+    private static void notifyShot(LivingEntity shooter, Vec3 aimPoint) {
+        ShotListener listener = shotListener;
+        if (listener != null && aimPoint != null) listener.onShot(shooter, aimPoint);
+    }
+
     public static void init() {
         try {
             Class.forName("com.tacz.guns.api.entity.IGunOperator");
@@ -104,7 +132,7 @@ public class GunIntegration {
     public static boolean isVpbLoaded() { return vpbLoaded; }
     public static boolean isSbwLoaded() { return sbwLoaded; }
     public static boolean isGunModLoaded() { return taczLoaded || vpbLoaded || sbwLoaded; }
-    public static boolean isAnyGunLoaded() { return isGunModLoaded(); }
+    public static boolean isAnyGunLoaded() { return isGunModLoaded() || simHandler != null; }
 
     public static boolean isVpbGun(ItemStack stack) {
         return VpbGunHandler.isVpbGun(stack);
@@ -130,6 +158,8 @@ public class GunIntegration {
         }
     }
     public static GunHandler handlerFor(ItemStack stack) {
+        GunHandler sim = simHandler;
+        if (sim != null) return sim;
         if (stack == null || stack.isEmpty()) return FALLBACK_HANDLER;
         if (sbwLoaded && com.stevesarmy.compat.sbw.SbwCompat.isGun(stack)) {
             return sbwHandler;
@@ -144,6 +174,8 @@ public class GunIntegration {
     }
 
     public static GunHandler handlerFor(LivingEntity entity) {
+        GunHandler sim = simHandler;
+        if (sim != null) return sim;
         if (entity == null) return gunHandler;
         return handlerFor(entity.getMainHandItem());
     }
@@ -153,9 +185,21 @@ public class GunIntegration {
     }
 
     public static boolean hasGun(LivingEntity entity) { return handlerFor(entity).hasGun(entity); }
-    public static ShootResult shoot(LivingEntity shooter, LivingEntity target) { return handlerFor(shooter).shoot(shooter, target); }
-    public static ShootResult shootWithDeviation(LivingEntity shooter, ExposureCalculator.AimPointResult aimPoint, float pitchDeviation, float yawDeviation) { return handlerFor(shooter).shootWithDeviation(shooter, aimPoint, pitchDeviation, yawDeviation); }
-    public static ShootResult shootAtPosition(LivingEntity shooter, Vec3 targetPosition) { return handlerFor(shooter).shootAtPosition(shooter, targetPosition); }
+    public static ShootResult shoot(LivingEntity shooter, LivingEntity target) {
+        ShootResult result = handlerFor(shooter).shoot(shooter, target);
+        if (result == ShootResult.SUCCESS) notifyShot(shooter, target != null ? target.getEyePosition() : null);
+        return result;
+    }
+    public static ShootResult shootWithDeviation(LivingEntity shooter, ExposureCalculator.AimPointResult aimPoint, float pitchDeviation, float yawDeviation) {
+        ShootResult result = handlerFor(shooter).shootWithDeviation(shooter, aimPoint, pitchDeviation, yawDeviation);
+        if (result == ShootResult.SUCCESS) notifyShot(shooter, aimPoint != null ? aimPoint.position : null);
+        return result;
+    }
+    public static ShootResult shootAtPosition(LivingEntity shooter, Vec3 targetPosition) {
+        ShootResult result = handlerFor(shooter).shootAtPosition(shooter, targetPosition);
+        if (result == ShootResult.SUCCESS) notifyShot(shooter, targetPosition);
+        return result;
+    }
     public static boolean canReload(LivingEntity entity) { return handlerFor(entity).canReload(entity); }
     public static void reload(LivingEntity entity) { handlerFor(entity).reload(entity); }
     public static void refillMagazine(LivingEntity entity) { handlerFor(entity).refillMagazine(entity); }
@@ -214,6 +258,9 @@ public class GunIntegration {
     public static void lowCrouch(LivingEntity entity, boolean isLowCrouch) { handlerFor(entity).lowCrouch(entity, isLowCrouch); }
     public static boolean isLowCrouching(LivingEntity entity) { return handlerFor(entity).isLowCrouching(entity); }
     public static float[] getGunRecoil(LivingEntity entity) { return handlerFor(entity).getGunRecoil(entity); }
+    public static float getCrawlRecoilMultiplier(LivingEntity entity) {
+        return handlerFor(entity).getCrawlRecoilMultiplier(entity);
+    }
     public static int getRPM(LivingEntity entity) { return handlerFor(entity).getRPM(entity); }
     public static float getBurstMinInterval(LivingEntity entity) { return handlerFor(entity).getBurstMinInterval(entity); }
     public static float getAimInaccuracy(LivingEntity entity) { return handlerFor(entity).getAimInaccuracy(entity); }
@@ -276,6 +323,14 @@ public class GunIntegration {
         void lowCrouch(LivingEntity entity, boolean isLowCrouch);
         boolean isLowCrouching(LivingEntity entity);
         float[] getGunRecoil(LivingEntity entity);
+        /**
+         * TaCZ's per-gun {@code crawl_recoil_multiplier} (1.0 = no reduction):
+         * the recoil the gun actually kicks with while low-crouching. TaCZ
+         * applies it to the real kick via {@link #lowCrouch}; the aim model
+         * mirrors it through here so crawling gunners are not charged the
+         * standing recoil penalty.
+         */
+        default float getCrawlRecoilMultiplier(LivingEntity entity) { return 1.0f; }
         int getRPM(LivingEntity entity);
         float getBurstMinInterval(LivingEntity entity);
         float getAimInaccuracy(LivingEntity entity);
@@ -283,6 +338,64 @@ public class GunIntegration {
         GunshotSignature getGunshotSignature(LivingEntity entity);
         String getGunTabType(LivingEntity entity);
         boolean isMachineGun(LivingEntity entity);
+    }
+
+    private static class CompositeGunHandler implements GunHandler {
+        private static GunHandler forEntity(LivingEntity entity) {
+            if (entity == null) return FALLBACK_HANDLER;
+            ItemStack held = entity.getMainHandItem();
+            if (VpbGunHandler.isVpbGun(held)) return VPB_HANDLER;
+            if (isTaczGun(held)) return TACZ_HANDLER;
+            return FALLBACK_HANDLER;
+        }
+
+        private static GunHandler forStack(ItemStack stack) {
+            if (stack == null || stack.isEmpty()) return FALLBACK_HANDLER;
+            if (VpbGunHandler.isVpbGun(stack)) return VPB_HANDLER;
+            if (isTaczGun(stack)) return TACZ_HANDLER;
+            return FALLBACK_HANDLER;
+        }
+
+        @Override public boolean hasGun(LivingEntity entity) { return forEntity(entity).hasGun(entity); }
+        @Override public ShootResult shoot(LivingEntity shooter, LivingEntity target) { return forEntity(shooter).shoot(shooter, target); }
+        @Override public ShootResult shootWithDeviation(LivingEntity shooter, ExposureCalculator.AimPointResult aimPoint, float pitchDeviation, float yawDeviation) { return forEntity(shooter).shootWithDeviation(shooter, aimPoint, pitchDeviation, yawDeviation); }
+        @Override public ShootResult shootAtPosition(LivingEntity shooter, Vec3 targetPosition) { return forEntity(shooter).shootAtPosition(shooter, targetPosition); }
+        @Override public boolean canReload(LivingEntity entity) { return forEntity(entity).canReload(entity); }
+        @Override public void reload(LivingEntity entity) { forEntity(entity).reload(entity); }
+        @Override public void refillMagazine(LivingEntity entity) { forEntity(entity).refillMagazine(entity); }
+        @Override public void cancelReload(LivingEntity entity) { forEntity(entity).cancelReload(entity); }
+        @Override public void bolt(LivingEntity entity) { forEntity(entity).bolt(entity); }
+        @Override public void aim(LivingEntity entity, boolean isAiming) { forEntity(entity).aim(entity, isAiming); }
+        @Override public boolean isBolting(LivingEntity entity) { return forEntity(entity).isBolting(entity); }
+        @Override public boolean isReloading(LivingEntity entity) { return forEntity(entity).isReloading(entity); }
+        @Override public float getAimProgress(LivingEntity entity) { return forEntity(entity).getAimProgress(entity); }
+        @Override public long getShootCoolDown(LivingEntity entity) { return forEntity(entity).getShootCoolDown(entity); }
+        @Override public boolean isDrawing(LivingEntity entity) { return forEntity(entity).isDrawing(entity); }
+        @Override public double getEffectiveRange(LivingEntity entity) { return forEntity(entity).getEffectiveRange(entity); }
+        @Override public Optional<ItemStack> getGunStack(LivingEntity entity) { return forEntity(entity).getGunStack(entity); }
+        @Override public void initialData(LivingEntity entity) { forEntity(entity).initialData(entity); }
+        @Override public void draw(LivingEntity entity) { forEntity(entity).draw(entity); }
+        @Override public int getMagazineSize(LivingEntity entity) { return forEntity(entity).getMagazineSize(entity); }
+        @Override public int getCurrentAmmo(LivingEntity entity) { return forEntity(entity).getCurrentAmmo(entity); }
+        @Override public boolean hasAmmoInBarrel(LivingEntity entity) { return forEntity(entity).hasAmmoInBarrel(entity); }
+        @Override public boolean isManualBolt(LivingEntity entity) { return forEntity(entity).isManualBolt(entity); }
+        @Override public boolean useInventoryAmmo(LivingEntity entity) { return forEntity(entity).useInventoryAmmo(entity); }
+        @Override public String getGunId(LivingEntity entity) { return forEntity(entity).getGunId(entity); }
+        @Override public String getAmmoId(LivingEntity entity) { return forEntity(entity).getAmmoId(entity); }
+        @Override public int getCurrentAmmo(ItemStack gunStack) { return forStack(gunStack).getCurrentAmmo(gunStack); }
+        @Override public String getAmmoId(ItemStack gunStack) { return forStack(gunStack).getAmmoId(gunStack); }
+        @Override public int getAmmoCountForGun(ItemStack gunStack, ItemStack ammoStack) { return forStack(gunStack).getAmmoCountForGun(gunStack, ammoStack); }
+        @Override public void lowCrouch(LivingEntity entity, boolean isLowCrouch) { forEntity(entity).lowCrouch(entity, isLowCrouch); }
+        @Override public boolean isLowCrouching(LivingEntity entity) { return forEntity(entity).isLowCrouching(entity); }
+        @Override public float[] getGunRecoil(LivingEntity entity) { return forEntity(entity).getGunRecoil(entity); }
+        @Override public float getCrawlRecoilMultiplier(LivingEntity entity) { return forEntity(entity).getCrawlRecoilMultiplier(entity); }
+        @Override public int getRPM(LivingEntity entity) { return forEntity(entity).getRPM(entity); }
+        @Override public float getBurstMinInterval(LivingEntity entity) { return forEntity(entity).getBurstMinInterval(entity); }
+        @Override public float getAimInaccuracy(LivingEntity entity) { return forEntity(entity).getAimInaccuracy(entity); }
+        @Override public float getAimPitch(LivingEntity entity, Vec3 targetPosition) { return forEntity(entity).getAimPitch(entity, targetPosition); }
+        @Override public GunshotSignature getGunshotSignature(LivingEntity entity) { return forEntity(entity).getGunshotSignature(entity); }
+        @Override public String getGunTabType(LivingEntity entity) { return forEntity(entity).getGunTabType(entity); }
+        @Override public boolean isMachineGun(LivingEntity entity) { return forEntity(entity).isMachineGun(entity); }
     }
 
     private static class FallbackGunHandler implements GunHandler {
@@ -1171,6 +1284,36 @@ public class GunIntegration {
                 StevesArmyMod.LOGGER.debug("[TaCZ] Failed to get gun recoil: {}", e.getMessage());
             }
             return new float[]{0.5f, 0.25f};
+        }
+
+        @Override
+        public float getCrawlRecoilMultiplier(LivingEntity entity) {
+            try {
+                ItemStack gunStack = entity.getMainHandItem();
+                Class<?> iGunClass = Class.forName("com.tacz.guns.api.item.IGun");
+                Method getIGunOrNull = iGunClass.getMethod("getIGunOrNull", ItemStack.class);
+                Object iGun = getIGunOrNull.invoke(null, gunStack);
+                if (iGun == null) return 1.0f;
+
+                Method getGunId = iGunClass.getMethod("getGunId", ItemStack.class);
+                Object gunId = getGunId.invoke(iGun, gunStack);
+
+                Class<?> timelessApiClass = Class.forName("com.tacz.guns.api.TimelessAPI");
+                Method getCommonGunIndex = timelessApiClass.getMethod("getCommonGunIndex", ResourceLocation.class);
+                Object indexOpt = getCommonGunIndex.invoke(null, gunId);
+
+                if (indexOpt instanceof Optional<?> opt && opt.isPresent()) {
+                    Object gunIndex = opt.get();
+                    Method getGunData = gunIndex.getClass().getMethod("getGunData");
+                    Object gunData = getGunData.invoke(gunIndex);
+                    Method getCrawlRecoilMultiplier = gunData.getClass().getMethod("getCrawlRecoilMultiplier");
+                    Object multiplier = getCrawlRecoilMultiplier.invoke(gunData);
+                    if (multiplier instanceof Float f) return f;
+                }
+            } catch (Exception e) {
+                StevesArmyMod.LOGGER.debug("[TaCZ] Failed to get crawl recoil multiplier: {}", e.getMessage());
+            }
+            return 1.0f;
         }
 
         @Override

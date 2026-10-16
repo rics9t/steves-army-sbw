@@ -83,8 +83,25 @@ public class TransportOrderMessage {
     }
 
     private static void handleMountCrew(ServerPlayer sender, ServerLevel level, Vec3 aimPosition) {
-        if (!VS2Compat.isEnabled() && !SbwCompat.isLoaded()) {
+        if (!VS2Compat.isEnabled() && !com.stevesarmy.compat.SbwCompat.isEnabled()) {
             sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.vs2_unavailable"), true);
+            return;
+        }
+
+        // Dedicated vehicle crew board separately from the ordinary infantry taxi order.
+        Entity aimedVehicle = resolveAimedVehicle(sender);
+        if (aimedVehicle != null && com.stevesarmy.compat.SbwCompat.isOperational(aimedVehicle)) {
+            List<SoldierEntity> crew = CrewAssignment.stationlessCrewNear(level, sender, aimPosition, 64);
+            if (crew.isEmpty()) {
+                sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.no_crew"), true);
+                return;
+            }
+            int seated = CrewAssignment.mountCrewOnVehicle(level, aimedVehicle, crew);
+            StevesArmyMod.LOGGER.info("[Transport] MOUNT_CREW by {}: vehicle={} type={} crew={} seated={}",
+                sender.getName().getString(), aimedVehicle.getId(),
+                com.stevesarmy.compat.SbwCompat.getVehicleTypeName(aimedVehicle), crew.size(), seated);
+            sender.displayClientMessage(
+                Component.translatable("transport.steves_army.feedback.seated", seated, crew.size()), true);
             return;
         }
 
@@ -120,7 +137,7 @@ public class TransportOrderMessage {
         }
 
         int dismounted = 0;
-        if (SbwCompat.isLoaded()) {
+        if (SbwCompat.isLoaded() && com.stevesarmy.compat.SbwCompat.isEnabled()) {
             dismounted += VehicleWreckHandler.dismountAll(soldiers);
         }
 
@@ -151,7 +168,7 @@ public class TransportOrderMessage {
      * keep going through {@link #resolveAimedShip}.
      */
     private static Entity resolveAimedVehicle(ServerPlayer sender) {
-        if (!SbwCompat.isLoaded()) {
+        if (!SbwCompat.isLoaded() || !com.stevesarmy.compat.SbwCompat.isEnabled()) {
             return null;
         }
         HitResult clip = sender.pick(GET_SHIP_PICK_DISTANCE, 1.0F, false);
@@ -196,7 +213,7 @@ public class TransportOrderMessage {
             return;
         }
 
-        if (SbwCompat.isLoaded()) {
+        if (SbwCompat.hasVehicles()) {
             Entity targetedVehicle = resolveAimedVehicle(sender);
             if (targetedVehicle == null) {
                 Vec3 eye = sender.getEyePosition();

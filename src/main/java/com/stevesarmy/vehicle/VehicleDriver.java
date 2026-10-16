@@ -3,6 +3,7 @@ package com.stevesarmy.vehicle;
 import com.stevesarmy.StevesArmyMod;
 import com.stevesarmy.compat.sbw.SbwVehicles;
 import com.stevesarmy.entity.SoldierEntity;
+import com.stevesarmy.entity.SoldierRole;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.Mth;
@@ -15,7 +16,8 @@ import java.util.Deque;
 import java.util.UUID;
 
 /**
- * Server-side autonomous driver for one SBW vehicle.
+ * Server-side driver for one SBW vehicle. Dedicated vehicle crew can follow
+ * their owner; ordinary combat troops only pilot on an explicit move ping.
  *
  * Uses native SBW inputs so acceleration, speed, and handling match the original mod.
  */
@@ -138,23 +140,27 @@ public final class VehicleDriver {
         VehicleWeaponController.tick(this, vehicle);
 
         if (soldier != null && soldier.isAlive()) {
-            if (soldier.hasValidPingMoveTarget()) {
+            boolean dedicatedCrew = soldier.getRole() == SoldierRole.VEHICLE_CREW;
+            // Infantry use vehicles as transport by default. A move ping is the
+            // explicit opt-in that lets the driver-seat soldier steer; FOLLOW
+            // and ATTACK must not turn every taxi rider into an autonomous driver.
+            if (!dedicatedCrew && soldier.hasValidPingMoveTarget()) {
                 BlockPos target = soldier.getPingMoveTarget();
                 if (mode != VehicleDriveMode.GO_TO || destination == null || !destination.equals(target)) {
                     orderGoTo(target);
                 }
-            } else if (soldier.hasValidAttackTarget()) {
+            } else if (dedicatedCrew && soldier.hasValidAttackTarget()) {
                 BlockPos attackPos = soldier.getAttackTargetPos();
                 Vec3 targetVec = Vec3.atCenterOf(attackPos);
                 if (mode != VehicleDriveMode.ATTACK || attackTargetPos == null || attackTargetPos.distanceToSqr(targetVec) > 4.0) {
                     orderAttack(null, targetVec);
                 }
-            } else if (soldier.getSquadMode() == com.stevesarmy.squad.SquadMode.FOLLOW) {
+            } else if (dedicatedCrew && soldier.getSquadMode() == com.stevesarmy.squad.SquadMode.FOLLOW) {
                 Entity owner = soldier.getOwner();
                 if (owner != null && (mode != VehicleDriveMode.FOLLOW || (followTarget.get() != owner && followTarget.get() != null))) {
                     orderFollow(owner);
                 }
-            } else if (soldier.getSquadMode() == com.stevesarmy.squad.SquadMode.HOLD) {
+            } else if (dedicatedCrew && soldier.getSquadMode() == com.stevesarmy.squad.SquadMode.HOLD) {
                 if (mode != VehicleDriveMode.HOLD && mode != VehicleDriveMode.IDLE && mode != VehicleDriveMode.DISMOUNT) {
                     orderHold();
                 }

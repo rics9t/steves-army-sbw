@@ -1,11 +1,19 @@
 package com.stevesarmy.combat.cover;
 
+import com.stevesarmy.GameClock;
+import com.stevesarmy.StevesArmyConfig;
 import com.stevesarmy.StevesArmyMod;
 import com.stevesarmy.combat.GunIntegration;
 import com.stevesarmy.entity.SoldierEntity;
+import com.stevesarmy.squad.SquadData;
+import com.stevesarmy.squad.SquadManager;
+import com.stevesarmy.squad.SquadThreatIntel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.phys.Vec3;
+
+import java.util.UUID;
 
 public class CoverBehaviorManager {
     
@@ -19,6 +27,8 @@ public class CoverBehaviorManager {
     
     private static final int PEEK_COUNT_PENALTY_THRESHOLD = 4;
     private static final float MAX_COVER_PENALTY = 0.60f;
+    /** "Physically in this cover" radius for keeping the reservation on clearCover (matches the manager's sweep). */
+    private static final double OCCUPIED_COVER_RADIUS_SQ = 6.25;
     
     private SoldierEntity soldier;
     private CoverState state = CoverState.NO_COVER;
@@ -43,6 +53,17 @@ public class CoverBehaviorManager {
     private long recentSuppressionFiringOriginTime = 0L;
 
     private static final long SUPPRESSION_FIRING_ORIGIN_MEMORY_MS = 15000L;
+
+    // Suppressed-traveler doctrine (dangerTravelResponse): see handleSuppressedTravel.
+    /** Squad intel report cadence for near-miss shooters (one per sustained burst). */
+    private static final int TRAVEL_INTEL_FEED_INTERVAL_TICKS = 40;
+    private boolean travelReroutePending = false;
+    private int travelRerouteCooldownUntilTick = 0;
+    private int travelReroutesServed = 0;
+    /** Not Long.MIN_VALUE: (tickCount - MIN_VALUE) overflows and silently disables the feed. */
+    private int lastTravelIntelFeedTick = -TRAVEL_INTEL_FEED_INTERVAL_TICKS;
+    /** A GO_TO ping relocation is in flight (set/cleared by CoverTacticalGoal). */
+    private boolean goToRelocationActive = false;
     
     private int peekCountSameCover = 0;
     private int savedPeekCount = 0;
@@ -149,7 +170,7 @@ public class CoverBehaviorManager {
         }
         
         if (state == CoverState.SEEKING_COVER || state == CoverState.REPOSITIONING) {
-            this.seekingStartTime = System.currentTimeMillis();
+            this.seekingStartTime = GameClock.nowMs();
         }
         
         // Only set coverEntryTime when entering a cover state from a non-cover state.
@@ -157,7 +178,7 @@ public class CoverBehaviorManager {
         // cover-entry time so suppression/recovery cycles don't reset the dwell clock.
         if ((state == CoverState.IN_COVER || state == CoverState.SUPPRESSED_IN_COVER)) {
             if (oldState != CoverState.IN_COVER && oldState != CoverState.SUPPRESSED_IN_COVER) {
-                this.coverEntryTime = System.currentTimeMillis();
+                this.coverEntryTime = GameClock.nowMs();
             }
             if (currentCover != null) {
                 this.lastCoverQuality = currentCover.getQuality();
@@ -185,7 +206,7 @@ public class CoverBehaviorManager {
                 cover != null ? cover.getPosition() + " type=" + cover.getType() + " combatScore=" + String.format("%.2f", cover.getCombatScore()) + " quality=" + String.format("%.2f", cover.getQuality()) : "null");
         }
         if (cover != null) {
-            this.coverEntryTime = System.currentTimeMillis();
+            this.coverEntryTime = GameClock.nowMs();
             this.lastCoverQuality = cover.getCombatScore();
             this.entryThreatDirection = soldier.getThreatAwareness().getPrimaryDirection(soldier.position());
             
@@ -269,19 +290,27 @@ public class CoverBehaviorManager {
     
     public void clearCover() {
         if (debugLog()) {
-            StevesArmyMod.LOGGER.info("[CoverBehaviorManager] Soldier {} clearCover: current={}, state={}->NO_COVER", 
+            StevesArmyMod.LOGGER.info("[CoverBehaviorManager] Soldier {} clearCover: current={}, state={}->NO_COVER",
                 soldier.getId(),
                 currentCover != null ? currentCover.getPosition().toString() : "null",
                 state);
         }
 
+        // Releasing the claim of a soldier still physically standing at the
+        // spot lets the next searcher (any role) reserve it and walk in. Keep
+        // the claim instead: the reservation manager's occupancy sweep keeps
+        // it alive while they stand there and frees it once they leave.
         if (currentCover != null) {
-            CoverReservationManager.release(currentCover.getPosition(), soldier);
+            if (!isPhysicallyOccupying(currentCover)) {
+                CoverReservationManager.release(currentCover.getPosition(), soldier);
+            }
             this.lastCover = currentCover;
             syncLastCover();
         }
         if (targetCover != null) {
-            CoverReservationManager.release(targetCover.getPosition(), soldier);
+            if (!isPhysicallyOccupying(targetCover)) {
+                CoverReservationManager.release(targetCover.getPosition(), soldier);
+            }
             this.targetCover = null;
             syncTargetCover();
         }
@@ -312,6 +341,12 @@ public class CoverBehaviorManager {
         soldier.refreshDimensions();
     }
     
+    private boolean isPhysicallyOccupying(CoverPoint cover) {
+        return soldier != null && cover != null
+            && soldier.position().distanceToSqr(net.minecraft.world.phys.Vec3.atCenterOf(cover.getPosition()))
+                <= OCCUPIED_COVER_RADIUS_SQ;
+    }
+
     public void clearTargetCover() {
         if (debugLog()) {
             StevesArmyMod.LOGGER.info("[CoverBehaviorManager] Soldier {} clearTargetCover: target={}", 
@@ -373,12 +408,12 @@ public class CoverBehaviorManager {
     
     public long getTimeInCover() {
         if (coverEntryTime == 0) return 0;
-        return System.currentTimeMillis() - coverEntryTime;
+        return GameClock.nowMs() - coverEntryTime;
     }
     
     public long getTimeSeeking() {
         if (seekingStartTime == 0) return 0;
-        return System.currentTimeMillis() - seekingStartTime;
+        return GameClock.nowMs() - seekingStartTime;
     }
     
     public long getLastPeekTime() {
@@ -386,7 +421,7 @@ public class CoverBehaviorManager {
     }
     
     public void onPeekShot() {
-        this.lastPeekTime = System.currentTimeMillis();
+        this.lastPeekTime = GameClock.nowMs();
     }
     
     public void recordPeekCycle() {
@@ -437,8 +472,23 @@ public class CoverBehaviorManager {
         if (shooter != null && soldier instanceof com.stevesarmy.entity.SoldierEntity s && s.isFriendlyTo(shooter)) {
             return;
         }
-        suppressionTracker.onNearMiss(bulletPath, soldier, bulletSpeed, shooter);
+        // Travel suppression resistance: a moving soldier is a harder target to
+        // suppress, so the pressured band (re-route / no-cover-dive doctrine)
+        // survives sustained real fire instead of being blown through in ~0.3 s.
+        float gainScale = 1.0f;
+        if (StevesArmyConfig.isDangerTravelResponseEnabled() && isActivelyTraveling(soldier)) {
+            gainScale = (float) StevesArmyConfig.getDangerTravelSuppressionGain();
+        }
+        suppressionTracker.onNearMiss(bulletPath, soldier, bulletSpeed, shooter, gainScale);
         recordSuppressionFiringOrigin(firingOrigin);
+        handleSuppressedTravel(soldier, shooter, firingOrigin);
+    }
+
+    /** True while the soldier is executing a long move: hold-march or GO_TO ping relocation. */
+    private boolean isActivelyTraveling(net.minecraft.world.entity.LivingEntity subject) {
+        if (!(subject instanceof SoldierEntity se)) return false;
+        if (goToRelocationActive) return true;
+        return com.stevesarmy.entity.ai.SoldierHoldPositionGoal.isTravelingToObjective(se);
     }
 
     /**
@@ -491,7 +541,7 @@ public class CoverBehaviorManager {
     @javax.annotation.Nullable
     public Vec3 getRecentSuppressionFiringOrigin() {
         if (recentSuppressionFiringOrigin == null
-            || System.currentTimeMillis() - recentSuppressionFiringOriginTime > SUPPRESSION_FIRING_ORIGIN_MEMORY_MS) {
+            || GameClock.nowMs() - recentSuppressionFiringOriginTime > SUPPRESSION_FIRING_ORIGIN_MEMORY_MS) {
             return null;
         }
         return recentSuppressionFiringOrigin;
@@ -500,8 +550,102 @@ public class CoverBehaviorManager {
     private void recordSuppressionFiringOrigin(@javax.annotation.Nullable Vec3 firingOrigin) {
         if (firingOrigin != null) {
             recentSuppressionFiringOrigin = firingOrigin;
-            recentSuppressionFiringOriginTime = System.currentTimeMillis();
+            recentSuppressionFiringOriginTime = GameClock.nowMs();
         }
+    }
+
+    /**
+     * Suppressed-traveler doctrine (dangerTravelResponse): near-misses against a
+     * soldier who is marching in the open do two things beyond personal
+     * suppression - they report the shooter to squad intel so the danger map
+     * bakes the new shadow, and they raise a travel-reroute flag that
+     * SoldierHoldPositionGoal consumes to recompute the march path around it.
+     * Cover-seek itself keeps waiting until pinned (CoverTacticalGoal decides).
+     */
+    private void handleSuppressedTravel(net.minecraft.world.entity.LivingEntity suppressed,
+                                        @javax.annotation.Nullable net.minecraft.world.entity.LivingEntity shooter,
+                                        @javax.annotation.Nullable Vec3 firingOrigin) {
+        if (!StevesArmyConfig.isDangerTravelResponseEnabled()) return;
+        if (!(suppressed instanceof SoldierEntity traveler)) return;
+        if (!(traveler.level() instanceof ServerLevel serverLevel)) return;
+        UUID squadId = traveler.getSquadId();
+        if (squadId == null) return;
+
+        int now = traveler.tickCount;
+
+        // 1. Intel feed: the squad learns where fire is coming from even though
+        //    nobody has spotted the shooter. Rate-limited to one report per
+        //    burst-sized window; ThreatKnowledge dedupes by threat id.
+        if (now - lastTravelIntelFeedTick >= TRAVEL_INTEL_FEED_INTERVAL_TICKS
+                && (shooter != null || firingOrigin != null)) {
+            lastTravelIntelFeedTick = now;
+            UUID threatId;
+            BlockPos reportPos;
+            if (shooter != null) {
+                threatId = shooter.getUUID();
+                // Eye position, not block center: a shooter hugging low cover
+                // has his block center below the obstacle line, and bakes from
+                // there read every cell as safe. Rays must start at eye height.
+                reportPos = BlockPos.containing(shooter.getEyePosition());
+            } else {
+                // Unknown shooter: key the threat by the rounded firing origin so
+                // consecutive shots from the same spot stay one shadow.
+                reportPos = BlockPos.containing(firingOrigin);
+                threatId = UUID.nameUUIDFromBytes(
+                    ("sa-suppression|" + reportPos.getX() + "," + reportPos.getY() + "," + reportPos.getZ())
+                        .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            }
+            SquadThreatIntel intel = SquadManager.get(serverLevel).getSquadById(squadId)
+                .map(SquadData::getThreatIntel).orElse(null);
+            if (intel != null) {
+                intel.reportThreatPosition(traveler.getUUID(), threatId, reportPos,
+                    0.5f, serverLevel);
+            }
+        }
+
+        // 2. Reroute request: only while actually marching (no cover claim, or a
+        //    GO_TO ping relocation in flight) and pressured but not yet pinned -
+        //    pinned hands control back to the cover goal. The cooldown keeps
+        //    sustained fire from re-pathing on every individual miss.
+        if (now < travelRerouteCooldownUntilTick) return;
+        float suppression = suppressionTracker.getSuppressionLevel();
+        if (suppression < SuppressionTracker.PRESSURED_THRESHOLD
+            || suppression >= SuppressionTracker.PINNED_THRESHOLD) {
+            return;
+        }
+        if (state != CoverState.NO_COVER && !goToRelocationActive) return;
+        if (traveler.getNavigation().isDone()) return;
+        travelReroutePending = true;
+        travelRerouteCooldownUntilTick = now + StevesArmyConfig.getDangerTravelRerouteCooldownTicks();
+    }
+
+    /** Current personal suppression level (0..1) for travel-posture decisions. */
+    public float getSuppressionLevel() {
+        return suppressionTracker.getSuppressionLevel();
+    }
+
+    /** CoverTacticalGoal marks GO_TO ping relocations so travel logic can see them. */
+    public void setGoToRelocationActive(boolean active) {
+        this.goToRelocationActive = active;
+    }
+
+    public boolean isGoToRelocationActive() {
+        return goToRelocationActive;
+    }
+
+    /** One-shot: a marching soldier under fire asked the hold goal to re-route. */
+    public boolean consumeTravelRerouteRequest() {
+        boolean pending = travelReroutePending;
+        travelReroutePending = false;
+        if (pending) {
+            travelReroutesServed++;
+        }
+        return pending;
+    }
+
+    /** Sim/debug telemetry: how many travel re-routes this soldier has served. */
+    public int getTravelReroutesServed() {
+        return travelReroutesServed;
     }
 
     public void onExplosion(Vec3 explosionPosition, float exposure) {
@@ -588,12 +732,12 @@ public class CoverBehaviorManager {
     
     public long getTimeSinceLastPeek() {
         if (lastPeekEndTime == 0) return Long.MAX_VALUE;
-        return System.currentTimeMillis() - lastPeekEndTime;
+        return GameClock.nowMs() - lastPeekEndTime;
     }
     
     public long getTimeInCurrentPeekState() {
         if (peekStartTime == 0) return 0;
-        return System.currentTimeMillis() - peekStartTime;
+        return GameClock.nowMs() - peekStartTime;
     }
     
     public void resetPeekState() {

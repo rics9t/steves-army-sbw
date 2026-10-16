@@ -59,6 +59,11 @@ public class SoldierGroundNavigation extends GroundPathNavigation {
         return this.createPath(target, accuracy);
     }
 
+    /** Read-back of the current navigation speed (no vanilla getter in 1.20.1). */
+    public double getNavSpeedModifier() {
+        return this.speedModifier;
+    }
+
     @Override
     public boolean moveTo(double x, double y, double z, double speedModifier) {
         if (isPreparingOrReloading() && !isCoverApproachDuringReload()) {
@@ -130,10 +135,16 @@ public class SoldierGroundNavigation extends GroundPathNavigation {
                     return;
                 }
             }
-            if (!asyncPath.canReach() || asyncPath.getNodeCount() == 0) {
+            if (asyncPath.getNodeCount() == 0) {
                 this.stop();
                 return;
             }
+            // A budget-exhausted partial path is still real progress toward the
+            // target (vanilla A* returns best-effort partials and walks them).
+            // Hard-stopping here froze any march whose search lens outgrows the
+            // node budget - e.g. danger-cost detours while marching under fire -
+            // because the soldier can never close distance for a cheaper retry.
+            // Goal-level stall detection (no path progress) handles pathology.
         }
         super.tick();
     }

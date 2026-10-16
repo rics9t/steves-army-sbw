@@ -93,6 +93,11 @@ public final class CoverSearchScheduler {
         }
     }
 
+    /** Live queue depth for the cover state-machine debug render. */
+    public static int pendingCount() {
+        return PENDING.size();
+    }
+
     @SubscribeEvent
     public static void onServerTick(TickEvent.ServerTickEvent event) {
         if (event.phase != TickEvent.Phase.END) {
@@ -197,6 +202,11 @@ public final class CoverSearchScheduler {
                 PerformanceMetrics.recordCoverSearchRequestCancelled();
             }
         }
+    }
+
+    /** Simulation-harness isolation: drop all queued requests between scenarios. */
+    public static void resetForSim() {
+        PENDING.clear();
     }
 
     private static final class Request {

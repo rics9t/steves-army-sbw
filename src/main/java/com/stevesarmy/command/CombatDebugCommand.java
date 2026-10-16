@@ -13,6 +13,7 @@ import com.stevesarmy.client.model.PoseConfig;
 import com.stevesarmy.combat.ArmorDoctrineDebugManager;
 import com.stevesarmy.combat.ArmorRoleManager;
 import com.stevesarmy.combat.ArmorThreatScanner;
+import com.stevesarmy.combat.CoverStateDebugManager;
 import com.stevesarmy.combat.GunIntegration;
 import com.stevesarmy.combat.SidearmDebugManager;
 import com.stevesarmy.combat.SuppressPingDebugManager;
@@ -53,6 +54,7 @@ import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.phys.Vec3;
@@ -102,6 +104,24 @@ public class CombatDebugCommand {
                     .executes(ctx -> setSuppressPingDebug(ctx, true)))
                 .then(Commands.literal("off")
                     .executes(ctx -> setSuppressPingDebug(ctx, false))))
+
+            // === DANGER MAP ===
+            .then(Commands.literal("dangermap")
+                .executes(ctx -> setDangerMapDebug(ctx, true, false))
+                .then(Commands.literal("on")
+                    .executes(ctx -> setDangerMapDebug(ctx, true, false)))
+                .then(Commands.literal("all")
+                    .executes(ctx -> setDangerMapDebug(ctx, true, true)))
+                .then(Commands.literal("off")
+                    .executes(ctx -> setDangerMapDebug(ctx, false, false))))
+
+            // === COVER STATE MACHINE ===
+            .then(Commands.literal("coverstate")
+                .executes(ctx -> setCoverStateDebug(ctx, true))
+                .then(Commands.literal("on")
+                    .executes(ctx -> setCoverStateDebug(ctx, true)))
+                .then(Commands.literal("off")
+                    .executes(ctx -> setCoverStateDebug(ctx, false))))
 
             // === SIDEARM FALLBACK ===
             .then(Commands.literal("sidearm")
@@ -220,6 +240,8 @@ public class CombatDebugCommand {
                     .executes(CombatDebugCommand::togglePeekCandidates))
                 .then(Commands.literal("rays")
                     .executes(CombatDebugCommand::toggleRayVisualization))
+                .then(Commands.literal("fov")
+                    .executes(CombatDebugCommand::toggleFovCones))
                 .then(Commands.literal("solid")
                     .executes(CombatDebugCommand::toggleSolidVisualization))
                 .then(Commands.literal("coverpoints")
@@ -321,6 +343,10 @@ public class CombatDebugCommand {
                 .then(Commands.literal("reload")
                     .executes(CombatDebugCommand::reloadSkins)))
 
+            // === CQB TRAINING COURSE ===
+            .then(Commands.literal("course")
+                .executes(CombatDebugCommand::buildCqbCourse))
+
             // === STATUS (show all toggle states) ===
             .then(Commands.literal("status")
                 .executes(CombatDebugCommand::showDebugStatus))
@@ -358,6 +384,7 @@ public class CombatDebugCommand {
              "  mg evaluate [entity] - Evaluate MG firing-position pipeline (read-only)\n" +
              "  armor [off|minimal|verbose] - Toggle armor-doctrine debug render\n" +
             "  suppressping [on|off] - Toggle the suppress-ping debug render\n" +
+            "  dangermap [on|off|all] - Danger-map overlay for YOUR squads ('all' includes enemy/other players'): baked cells (red=eye-exposed, orange=leg-only, green=shadow), blue=path corridors, threat markers, bake stats\n" +
              "  armor <entity>      - Print one soldier's armor-doctrine role/gates\n" +
              "  metrics [on|off|reset] - Collect/show opt-in performance counters\n" +
             "  log cover [on|off]  - Toggle cover behavior logging\n" +
@@ -411,6 +438,10 @@ public class CombatDebugCommand {
         CoverDebugManager.setShowPeekCandidates(true);
         CoverDebugManager.setVisualizationEnabled(true);
         DiagnosticLogManager.enableAll();
+        if (context.getSource().getEntity() instanceof ServerPlayer player) {
+            CoverStateDebugManager.setEnabled(player, true);
+            com.stevesarmy.combat.DangerMapDebugManager.setEnabled(player, true);
+        }
 
         context.getSource().sendSuccess(() -> Component.literal(
             "=== Steve's Army Debug: ALL ON ===\n" +
@@ -441,6 +472,10 @@ public class CombatDebugCommand {
         DiagnosticLogManager.disableAll();
         CoverDebugManager.setShowRays(false);
         CoverDebugManager.setShowSolidBlocks(false);
+        if (context.getSource().getEntity() instanceof ServerPlayer player) {
+            CoverStateDebugManager.setEnabled(player, false);
+            com.stevesarmy.combat.DangerMapDebugManager.setEnabled(player, false);
+        }
 
         context.getSource().sendSuccess(() -> Component.literal(
             "=== Steve's Army Debug: ALL OFF ===\n" +
@@ -703,6 +738,26 @@ public class CombatDebugCommand {
         return 1;
     }
 
+    private static int toggleFovCones(CommandContext<CommandSourceStack> context) {
+        boolean enabled = !com.stevesarmy.client.FovConeDebugRenderer.isEnabled();
+        com.stevesarmy.client.FovConeDebugRenderer.setEnabled(enabled);
+        context.getSource().sendSuccess(() -> Component.literal(
+            "Soldier FOV cone visualization (90\u00b0 detection arc): " + (enabled ? "ON" : "OFF")
+        ), true);
+        return 1;
+    }
+
+    private static int buildCqbCourse(CommandContext<CommandSourceStack> context) {
+        ServerPlayer player = context.getSource().getPlayer();
+        if (player == null) {
+            context.getSource().sendFailure(Component.literal("The course builder needs a player."));
+            return 0;
+        }
+        com.stevesarmy.client.FovConeDebugRenderer.setEnabled(true);
+        CqbCourseBuilder.build(context.getSource().getLevel(), player);
+        return 1;
+    }
+
     private static int toggleSolidVisualization(CommandContext<CommandSourceStack> context) {
         boolean enabled = !CoverDebugManager.isShowSolidBlocks();
         CoverDebugManager.setShowSolidBlocks(enabled);
@@ -940,22 +995,46 @@ public class CombatDebugCommand {
 
     private static int showReservations(CommandContext<CommandSourceStack> context) {
         CommandSourceStack source = context.getSource();
-        var reservations = CoverReservationManager.getAllReservationCounts();
+        var reservations = CoverReservationManager.getReservationOwners();
+        var proneLanes = CoverReservationManager.getProneLaneOwners();
 
-        if (reservations.isEmpty()) {
+        if (reservations.isEmpty() && proneLanes.isEmpty()) {
             source.sendSuccess(() -> Component.literal("No cover reservations"), false);
             return 0;
         }
 
         source.sendSuccess(() -> Component.literal("=== COVER RESERVATIONS ==="), false);
-        source.sendSuccess(() -> Component.literal("Total: " + reservations.size()), false);
+        source.sendSuccess(() -> Component.literal(
+            "Standing covers: " + reservations.size() + " | Prone lanes: " + proneLanes.size()), false);
         for (var entry : reservations.entrySet()) {
             BlockPos pos = entry.getKey();
+            StringBuilder holders = new StringBuilder();
+            for (java.util.UUID uuid : entry.getValue()) {
+                if (holders.length() > 0) holders.append(", ");
+                holders.append(describeReservationHolder(source.getLevel(), uuid));
+            }
             source.sendSuccess(() -> Component.literal(
-                "  " + pos.getX() + "," + pos.getY() + "," + pos.getZ() + " | Soldiers: " + entry.getValue()
-            ), false);
+                "  " + pos.getX() + "," + pos.getY() + "," + pos.getZ() + " | " + holders), false);
+        }
+        for (var entry : proneLanes.entrySet()) {
+            BlockPos pos = entry.getValue();
+            String holder = describeReservationHolder(source.getLevel(), entry.getKey());
+            source.sendSuccess(() -> Component.literal(
+                "  prone " + pos.getX() + "," + pos.getY() + "," + pos.getZ() + " | " + holder), false);
         }
         return 1;
+    }
+
+    /** Owner name + role for a reservation dump; unresolvable UUIDs stay visible as unloaded. */
+    private static String describeReservationHolder(ServerLevel level, java.util.UUID uuid) {
+        Entity entity = level.getEntity(uuid);
+        if (entity instanceof com.stevesarmy.entity.SoldierEntity soldier) {
+            return soldier.getName().getString() + " (" + soldier.getRole().name().toLowerCase() + ")";
+        }
+        if (entity instanceof Player player) {
+            return player.getName().getString() + " (player)";
+        }
+        return entity != null ? entity.getName().getString() : "<unloaded " + uuid + ">";
     }
 
     private static int showSuppression(CommandContext<CommandSourceStack> context) {
@@ -1101,6 +1180,31 @@ public class CombatDebugCommand {
         }
         SuppressPingDebugManager.setEnabled(player, enabled);
         source.sendSuccess(() -> Component.literal("Suppress ping debug render: "
+            + (enabled ? "ON" : "OFF")), false);
+        return 1;
+    }
+
+    private static int setDangerMapDebug(CommandContext<CommandSourceStack> context, boolean enabled,
+                                         boolean showAllSquads) {
+        CommandSourceStack source = context.getSource();
+        if (!(source.getEntity() instanceof ServerPlayer player)) {
+            source.sendFailure(Component.literal("Player only command"));
+            return 0;
+        }
+        com.stevesarmy.combat.DangerMapDebugManager.setEnabled(player, enabled, showAllSquads);
+        source.sendSuccess(() -> Component.literal("Danger map debug render: "
+            + (enabled ? (showAllSquads ? "ON (all squads)" : "ON (my squads)") : "OFF")), false);
+        return 1;
+    }
+
+    private static int setCoverStateDebug(CommandContext<CommandSourceStack> context, boolean enabled) {
+        CommandSourceStack source = context.getSource();
+        if (!(source.getEntity() instanceof ServerPlayer player)) {
+            source.sendFailure(Component.literal("Player only command"));
+            return 0;
+        }
+        CoverStateDebugManager.setEnabled(player, enabled);
+        source.sendSuccess(() -> Component.literal("Cover state-machine debug render: "
             + (enabled ? "ON" : "OFF")), false);
         return 1;
     }
@@ -1436,7 +1540,12 @@ public class CombatDebugCommand {
         LivingEntity threat = CoverDebugManager.getThreatEntity();
         BlockPos center = player.blockPosition();
         CoverFinder finder = new CoverFinder(player.level());
-        var bestCover = finder.findBestCover(center, radius, threat);
+        // Modern tactical scorer (same weights as live soldiers) so the debug
+        // probe reflects production picks; the player stands in for the soldier.
+        Vec3 threatDirection = threat == null ? null
+            : threat.position().subtract(center.getX() + 0.5, center.getY(), center.getZ() + 0.5);
+        List<LivingEntity> threats = threat == null ? List.of() : List.of(threat);
+        var bestCover = finder.findBestCover(player, threatDirection, threats, radius, null);
 
         if (bestCover.isEmpty()) {
             source.sendSuccess(() -> Component.literal("No cover found within radius " + radius), false);
@@ -1740,6 +1849,9 @@ public class CombatDebugCommand {
             "  Cover points: " + (CoverDebugManager.isVisualizationEnabled() ? "ON" : "OFF") + "\n" +
             "  Rays: " + (CoverDebugManager.isShowRays() ? "ON" : "OFF") + "\n" +
             "  Solid blocks: " + (CoverDebugManager.isShowSolidBlocks() ? "ON" : "OFF") + "\n" +
+            "  Danger map overlay: " + (com.stevesarmy.combat.DangerMapDebugManager.isEnabled(
+                context.getSource().getEntity() instanceof net.minecraft.server.level.ServerPlayer p
+                    ? p.getUUID() : null) ? "ON" : "OFF") + "\n" +
             "  Untargeted: " + CombatDebugRenderer.getMaxUntargeted()
         ), false);
         return 1;

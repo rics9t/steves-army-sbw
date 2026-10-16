@@ -1,11 +1,13 @@
 package com.stevesarmy.entity;
 
+import com.stevesarmy.GameClock;
 import com.stevesarmy.StevesArmyMod;
 import com.stevesarmy.StevesArmyConfig;
 import com.stevesarmy.compat.VS2Compat;
 import com.stevesarmy.skin.SoldierSkinManager;
 import com.stevesarmy.squad.OwnedSoldierRegistry;
 import com.stevesarmy.combat.CombatDebugData;
+import com.stevesarmy.combat.CoverStateDebugManager;
 import com.stevesarmy.combat.DetectionSystem;
 import com.stevesarmy.combat.GrenadeIntegration;
 import com.stevesarmy.combat.GunIntegration;
@@ -34,6 +36,7 @@ import com.stevesarmy.entity.ai.GrenadeTacticalController;
 import com.stevesarmy.inventory.SoldierInventory;
 import com.stevesarmy.inventory.SoldierInventoryHandler;
 import com.stevesarmy.network.NetworkHandler;
+import com.stevesarmy.network.CoverStateDebugPacket;
 import com.stevesarmy.network.OpenSoldierInventoryMessage;
 import com.stevesarmy.squad.FireDiscipline;
 import com.stevesarmy.squad.FireTeam;
@@ -84,6 +87,7 @@ import net.minecraftforge.common.capabilities.Capability;
 import net.minecraftforge.common.capabilities.ForgeCapabilities;
 import net.minecraftforge.common.util.LazyOptional;
 import net.minecraftforge.items.IItemHandler;
+import net.minecraftforge.network.PacketDistributor;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
@@ -228,6 +232,7 @@ public class SoldierEntity extends PathfinderMob implements Container {
     /** Set by the vehicle crew goal while it holds a hull MG or periscope station. */
     private boolean vehicleCrewActive;
     private final ThreatAwareness threatAwareness;
+    private final com.stevesarmy.entity.ai.TravelCrawlController travelCrawl;
     private final GrenadeTacticalController grenadeTacticalController;
     private final SoldierHealController healController;
     
@@ -283,11 +288,21 @@ public class SoldierEntity extends PathfinderMob implements Container {
     private boolean inventorySyncingFromEntity = false;
     private boolean cqbMode = false;
     private boolean cqbEngagementHold = false;
+    private long cqbHoldLatchedAtTick;
+    private long cqbHoldLastShotTick;
+    private long cqbHoldReleaseCooldownUntilTick;
+    private boolean closeCombatContext = false;
+    private long closeCombatContextRefreshedAtTick;
     private String lastSyncedCqbPath = null;
+    /** Fire-pipeline gate/shot state; lazily created (see getter) because
+     * registerGoals runs inside the superclass constructor. */
+    private com.stevesarmy.combat.EngagementTelemetry engagementTelemetry;
 
     public static final double CQB_RANGE = 5.0;
     /** Radius around the remaining path within which a known enemy triggers caution steering. */
     public static final double CQB_CAUTION_RADIUS = 10.0;
+    /** How long a close-combat context flag stays valid without a refresh from a threat-aware ticker. */
+    private static final long CLOSE_COMBAT_CONTEXT_STALE_TICKS = 40;
 
     public boolean isDispatchedBySend() {
         return dispatchedBySend;
@@ -328,12 +343,23 @@ public class SoldierEntity extends PathfinderMob implements Container {
     public void beginCqbEngagement() {
         if (cqbEngagementHold) return;
         cqbEngagementHold = true;
+        cqbHoldLatchedAtTick = tickCount;
+        cqbHoldLastShotTick = tickCount;
         // A full-cover peek return is the safety-critical movement here. Do not
         // clear it when close-range LOS is acquired during the duck-back.
         boolean returningToFullCover = getPeekController().isReturning()
             && getCoverBehaviorManager().getCurrentCover() != null
             && getCoverBehaviorManager().getCurrentCover().getType() == CoverType.FULL;
         if (returningToFullCover) return;
+
+        // An approach that is about to reach protection finishes first: the
+        // last step into cover beats engaging from the open. The hold flag is
+        // already set, so the controller freezes the soldier the moment the
+        // dock completes (or the threat closes inside the overrun range).
+        if (moveControl instanceof com.stevesarmy.entity.ai.CoverPositionController ctrl
+            && ctrl.shouldDeferCqbHold()) {
+            return;
+        }
 
         getNavigation().stop();
         cancelCoverMovement();
@@ -344,6 +370,61 @@ public class SoldierEntity extends PathfinderMob implements Container {
 
     public void endCqbEngagement() {
         cqbEngagementHold = false;
+    }
+
+    /** A burst started while the engagement hold is active — the hold is doing its job. */
+    public void markCqbHoldShot() {
+        cqbHoldLastShotTick = tickCount;
+    }
+
+    /** Ticks since the hold latched (or its last productive burst, whichever is newer). */
+    public long cqbHoldTicksWithoutShot() {
+        return tickCount - cqbHoldLastShotTick;
+    }
+
+    public void armCqbHoldReleaseCooldown() {
+        cqbHoldReleaseCooldownUntilTick = tickCount + StevesArmyConfig.getCqbHoldReleaseCooldownTicks();
+    }
+
+    public boolean isCqbHoldReleaseCooldown() {
+        return tickCount < cqbHoldReleaseCooldownUntilTick;
+    }
+
+    /**
+     * True when the engagement hold should actually pin the legs: a live
+     * point-blank threat (survival stop), or shot activity within the grace
+     * window (stand to shoot / through burst gaps). A hold that cannot
+     * produce fire past the grace never blocks movement - cover seeking
+     * outranks a frozen stance with no burst.
+     */
+    public boolean cqbHoldFreezeEffective() {
+        if (!cqbEngagementHold) return false;
+        LivingEntity threat = getTarget();
+        if (threat != null && threat.isAlive()
+            && distanceToSqr(threat) <= StevesArmyConfig.getCqbOverrunRange() * StevesArmyConfig.getCqbOverrunRange()) {
+            return true;
+        }
+        return tickCount - cqbHoldLastShotTick <= StevesArmyConfig.getCqbHoldFreezeGraceTicks();
+    }
+
+    /**
+     * Threat-aware tickers refresh the close-combat context each tick; the flag
+     * decays to false when no ticker runs (no combat goal, no threats).
+     */
+    public void refreshCloseCombatContext(boolean active) {
+        this.closeCombatContext = active;
+        this.closeCombatContextRefreshedAtTick = tickCount;
+    }
+
+    public boolean isInCloseCombatContext() {
+        return closeCombatContext && (tickCount - closeCombatContextRefreshedAtTick) <= CLOSE_COMBAT_CONTEXT_STALE_TICKS;
+    }
+
+    public com.stevesarmy.combat.EngagementTelemetry getEngagementTelemetry() {
+        if (engagementTelemetry == null) {
+            engagementTelemetry = new com.stevesarmy.combat.EngagementTelemetry();
+        }
+        return engagementTelemetry;
     }
 
     public String getSyncedCqbPath() {
@@ -396,6 +477,7 @@ public class SoldierEntity extends PathfinderMob implements Container {
         this.coverBehaviorManager = new CoverBehaviorManager(this);
         this.peekController = new PeekController();
         this.threatAwareness = new ThreatAwareness();
+        this.travelCrawl = new com.stevesarmy.entity.ai.TravelCrawlController(this);
         this.grenadeTacticalController = new GrenadeTacticalController(this);
         this.healController = new SoldierHealController(this);
         this.inventory.setMainHandChangedCallback(stack -> {
@@ -406,7 +488,10 @@ public class SoldierEntity extends PathfinderMob implements Container {
                     StevesArmyMod.LOGGER.info("[Soldier] Blocked gun swap during reload (callback)");
                     return;
                 }
-                setItemSlot(EquipmentSlot.MAINHAND, stack.copy());
+                // Share the inventory's stack instance with the hand slot so
+                // TaCZ's per-shot/reload NBT writes land on the stack the
+                // inventory shows; copying would strand them on an orphan.
+                setItemSlot(EquipmentSlot.MAINHAND, stack);
                 if (GunIntegration.isAnyGunLoaded() && !stack.isEmpty() && !reloading) {
                     GunIntegration.initialData(this);
                     GunIntegration.draw(this);
@@ -641,6 +726,10 @@ public class SoldierEntity extends PathfinderMob implements Container {
     @Override
     public ItemStack getPickedResult(HitResult target) {
         inventory.syncFromEntity(this);
+
+        for (int i = 0; i < inventory.getContainerSize(); i++) {
+            InfiniteReserveAmmo.stripInfiniteReserveNbt(inventory.getItem(i));
+        }
 
         ItemStack stack = new ItemStack(getPickBlockEggItem());
         CompoundTag tag = new CompoundTag();
@@ -1233,6 +1322,9 @@ public class SoldierEntity extends PathfinderMob implements Container {
         if (!anyItems) {
             return;
         }
+        for (int i = 0; i < inventory.getContainerSize(); i++) {
+            InfiniteReserveAmmo.stripInfiniteReserveNbt(inventory.getItem(i));
+        }
         com.stevesarmy.inventory.PouchContainer.dropInventoryAsPouch(this, inventory);
         for (int i = 0; i < inventory.getContainerSize(); i++) {
             inventory.setItem(i, ItemStack.EMPTY);
@@ -1313,7 +1405,7 @@ public class SoldierEntity extends PathfinderMob implements Container {
         }
         inventory.setItem(slot, stack);
         if (slot == SoldierInventory.SLOT_MAIN_HAND) {
-            setItemSlot(EquipmentSlot.MAINHAND, stack.copy());
+            setItemSlot(EquipmentSlot.MAINHAND, stack);
             if (GunIntegration.isAnyGunLoaded() && !stack.isEmpty() && !reloading) {
                 GunIntegration.initialData(this);
                 GunIntegration.draw(this);
@@ -1343,7 +1435,9 @@ public class SoldierEntity extends PathfinderMob implements Container {
         inventorySyncingFromEntity = true;
         try {
             if (slot == EquipmentSlot.MAINHAND) {
-                inventory.setItem(SoldierInventory.SLOT_MAIN_HAND, stack.copy());
+                // Share the instance (not a copy) so the persistent slot and
+                // the hand are always the same stack; see the main-hand callback.
+                inventory.setItem(SoldierInventory.SLOT_MAIN_HAND, stack);
             } else if (slot.getType() == EquipmentSlot.Type.ARMOR) {
                 int invSlot;
                 switch (slot) {
@@ -1360,9 +1454,21 @@ public class SoldierEntity extends PathfinderMob implements Container {
     }
 
     @Override
+    public boolean stillValid(Player player) {
+        return this.isAlive() && this.distanceTo(player) <= 64.0F;
+    }
+
+    /** Feeds the squad's shared danger map (first member per tick does the work; no-op without a squad). */
+    private void tickSquadDangerMap() {
+        if (!(level() instanceof ServerLevel serverLevel)) return;
+        UUID squad = getSquadId();
+        if (squad == null) return;
+        com.stevesarmy.squad.SquadManager.get(serverLevel).getSquadById(squad)
+            .ifPresent(data -> data.tickDangerMap(serverLevel, serverLevel.getGameTime(), position()));
+    }
+
     public void tick() {
         super.tick();
-
         if (this.level().isClientSide) {
             com.stevesarmy.network.SyncSoldierInventoryPacket.applyPendingInventory(this);
         }
@@ -1373,6 +1479,8 @@ public class SoldierEntity extends PathfinderMob implements Container {
             threatAwareness.tick();
             holdMovementForReload();
             updateCrawlFacing();
+            tickSquadDangerMap();
+            travelCrawl.tick();
             // Reload and cover helpers may hold navigation and update their own
             // crouch state. A live firing-prone plan remains the authoritative
             // posture until that plan explicitly cancels it.
@@ -1428,16 +1536,32 @@ public class SoldierEntity extends PathfinderMob implements Container {
         suppressionOrder.tick(this);
         refreshAttackTargetUnderFire();
         tickCoverStuckWatchdog();
+        if (tickCount % 10 == 0) {
+            sendCoverStateDebugPacket();
+        }
 
         long gameTime = level().getGameTime();
-        if (com.stevesarmy.compat.sbw.SbwCompat.isLoaded()) {
+        if (com.stevesarmy.compat.sbw.SbwCompat.hasVehicles()) {
             com.stevesarmy.compat.sbw.SbwCompat.tickVehicle(this);
         }
+        Entity sbwVehicle = getVehicle();
+        if (com.stevesarmy.compat.sbw.SbwCompat.hasVehicles()
+            && com.stevesarmy.compat.sbw.SbwCompat.isVehicle(sbwVehicle)
+            && !com.stevesarmy.compat.sbw.SbwVehicles.isDrone(sbwVehicle)) {
+            // SBW passengers are real taxi riders: keep them seated and freeze
+            // infantry AI. The driver registry handles explicit move pings;
+            // dedicated crew gunnery can still observe and fire from the vehicle.
+            if (getRole() == SoldierRole.VEHICLE_CREW) {
+                SbwVehicleGunnery.tickMounted(this);
+            } else {
+                setTarget(null);
+            }
+            if (shouldTickGrenadeController(gameTime)) {
+                grenadeTacticalController.tick(getTarget(), getGrenadeSquadIntel());
+            }
+            return;
+        }
         if (VS2Compat.prepareSoldierAi(this)) {
-            // Frozen-AI gunnery: while mounted on a Superb Warfare vehicle the
-            // soldier's only duty is spotting — SBW fires the vehicle weapons at
-            // whatever the riding Mob targets.
-            SbwVehicleGunnery.tickMounted(this);
             if (shouldTickGrenadeController(gameTime)) {
                 grenadeTacticalController.tick(getTarget(), getGrenadeSquadIntel());
             }
@@ -1449,6 +1573,20 @@ public class SoldierEntity extends PathfinderMob implements Container {
             return;
         }
         super.customServerAiStep();
+    }
+
+    /**
+     * Cover state-machine debug feed ({@code /stevesarmy_debug coverstate}).
+     * Runs from the entity tick rather than the cover goal so the card stays
+     * live during goal cooldowns and restarts — exactly the blind spots where
+     * strands hide. Read-only diagnostics.
+     */
+    private void sendCoverStateDebugPacket() {
+        if (!(getOwner() instanceof ServerPlayer serverPlayer)) return;
+        if (!CoverStateDebugManager.isEnabled(serverPlayer.getUUID())) return;
+        if (!(coverTacticalGoal instanceof CoverTacticalGoal tacticalGoal)) return;
+        CoverStateDebugPacket packet = tacticalGoal.buildCoverStateDebugPacket();
+        NetworkHandler.INSTANCE.send(PacketDistributor.PLAYER.with(() -> serverPlayer), packet);
     }
 
     // --- Cover anti-stuck watchdog -----------------------------------------
@@ -1657,7 +1795,7 @@ public class SoldierEntity extends PathfinderMob implements Container {
                 BlockPos pos = BlockPos.containing(position);
                 clearGoToState();
                 pingMoveTarget = pos;
-                pingMoveTimestamp = System.currentTimeMillis();
+                pingMoveTimestamp = GameClock.nowMs();
                 setSquadMode(com.stevesarmy.squad.SquadMode.HOLD);
                 setHoldPosition(pos);
                 coverBehaviorManager.clearCover();
@@ -1667,7 +1805,7 @@ public class SoldierEntity extends PathfinderMob implements Container {
             case GO_TO -> {
                 pingMoveGeneration++;
                 pingMoveTarget = BlockPos.containing(position);
-                pingMoveTimestamp = System.currentTimeMillis();
+                pingMoveTimestamp = GameClock.nowMs();
                 persistentGoTo = true;
                 goToHolding = false;
                 setSquadMode(com.stevesarmy.squad.SquadMode.HOLD);
@@ -1680,9 +1818,9 @@ public class SoldierEntity extends PathfinderMob implements Container {
                 BlockPos pos = BlockPos.containing(position);
                 threatAwareness.onPingDirection(pos);
                 pingThreatPos = pos;
-                pingThreatTimestamp = System.currentTimeMillis();
+                pingThreatTimestamp = GameClock.nowMs();
                 forcedTargetPos = pos;
-                forcedTargetTimestamp = System.currentTimeMillis();
+                forcedTargetTimestamp = GameClock.nowMs();
                 com.stevesarmy.StevesArmyMod.LOGGER.info("Set threat direction position: {} (forced target inherited from ENEMY)", pingThreatPos);
             }
             case LOCATION -> {
@@ -1751,7 +1889,7 @@ public BlockPos getPingMoveTarget() {
 
     public boolean hasValidPingMoveTarget() {
         return pingMoveTarget != null &&
-               (persistentGoTo || System.currentTimeMillis() - pingMoveTimestamp < PING_MOVE_MEMORY_MS);
+               (persistentGoTo || GameClock.nowMs() - pingMoveTimestamp < PING_MOVE_MEMORY_MS);
     }
 
     public boolean hasPersistentGoTo() {
@@ -1809,7 +1947,19 @@ public BlockPos getPingMoveTarget() {
 
     public boolean hasValidAttackTarget() {
         return attackTargetPos != null &&
-               System.currentTimeMillis() - attackTargetTimestamp < ATTACK_MEMORY_MS;
+               GameClock.nowMs() - attackTargetTimestamp < ATTACK_MEMORY_MS;
+    }
+
+    /**
+     * Clearing-doctrine persistence: {@link com.stevesarmy.squad.ClearingCoordinator}
+     * refreshes this while the ATTACK order of record is alive, so the 60s
+     * memory window never silently ends an active order. The timeout still
+     * applies once the order is gone (owner left, order completed/replaced).
+     */
+    public void refreshAttackOrderClock() {
+        if (attackTargetPos != null) {
+            attackTargetTimestamp = GameClock.nowMs();
+        }
     }
 
     /**
@@ -1822,7 +1972,7 @@ public BlockPos getPingMoveTarget() {
     private void refreshAttackTargetUnderFire() {
         if (attackTargetPos == null || coverBehaviorManager == null) return;
         if (coverBehaviorManager.getSuppressionTracker().getSuppressionLevel() >= 0.2f) {
-            attackTargetTimestamp = System.currentTimeMillis();
+            attackTargetTimestamp = GameClock.nowMs();
         }
     }
 
@@ -1833,7 +1983,7 @@ public BlockPos getPingMoveTarget() {
     public void setAttackTarget(BlockPos pos) {
         attackGeneration++;
         this.attackTargetPos = pos;
-        this.attackTargetTimestamp = System.currentTimeMillis();
+        this.attackTargetTimestamp = GameClock.nowMs();
         // Clear incompatible ping move target
         clearPingMoveTarget();
         // ATTACK is objective-only: it defines where the soldier should
@@ -1867,7 +2017,7 @@ public BlockPos getPingMoveTarget() {
     
     public boolean hasValidPingThreatPos() {
         return pingThreatPos != null && 
-               System.currentTimeMillis() - pingThreatTimestamp < PING_THREAT_MEMORY_MS;
+               GameClock.nowMs() - pingThreatTimestamp < PING_THREAT_MEMORY_MS;
     }
     
     public void clearPingThreatPos() {
@@ -1881,12 +2031,12 @@ public BlockPos getPingMoveTarget() {
     
     public boolean hasValidForcedTarget() {
         return forcedTargetPos != null && 
-               System.currentTimeMillis() - forcedTargetTimestamp < FORCED_TARGET_MEMORY_MS;
+               GameClock.nowMs() - forcedTargetTimestamp < FORCED_TARGET_MEMORY_MS;
     }
     
     public void setForcedTargetPos(BlockPos pos) {
         this.forcedTargetPos = pos;
-        this.forcedTargetTimestamp = System.currentTimeMillis();
+        this.forcedTargetTimestamp = GameClock.nowMs();
     }
     
     public void clearForcedTarget() {
@@ -2473,6 +2623,11 @@ public BlockPos getPingMoveTarget() {
     public ThreatAwareness getThreatAwareness() {
         return threatAwareness;
     }
+
+    /** Universal suppressed-movement posture controller (dangerTravelResponse). */
+    public com.stevesarmy.entity.ai.TravelCrawlController getTravelCrawlController() {
+        return travelCrawl;
+    }
     
     public void syncThreatDirection(Vec3 direction) {
         if (direction == null || direction.lengthSqr() < 0.001) {
@@ -2583,6 +2738,13 @@ public BlockPos getPingMoveTarget() {
         // already-selected cover approach. The cover goal and position
         // controller apply the bounded movement exception for this case.
         if (isMovingToUnoccupiedCoverDuringReload()) {
+            return;
+        }
+
+        // The claim→dock alignment onto an already-claimed cover also finishes
+        // through the reload — see CoverPositionController's dock exception.
+        if (moveControl instanceof com.stevesarmy.entity.ai.CoverPositionController ctrl
+            && ctrl.isFinishingCoverDockDuringReload()) {
             return;
         }
 

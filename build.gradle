@@ -90,6 +90,26 @@ minecraft {
         server {
             property 'forge.enabledGameTestNamespaces', mod_id
             args '--nogui'
+            // -Psim.autorun=true makes the dedicated server run every scenario
+            // headless at startup, write reports to run/sim_reports/, then halt.
+            // -Psim.scenario=<name> narrows the autorun (comma-separated list ok).
+            // -Psim.suite=full runs every registered scenario; the default 'core'
+            // runs only scenarios marked .core() (the stable per-family guards).
+            // -Psim.coverlog=true enables per-candidate [CoverScore] traces.
+            // -Psim.suplog / -Psim.ailog / -Psim.dmglog / -Psim.statedlog enable
+            // [Suppression] / combat-goal / per-shot gate / cover-state traces.
+            // -Psim.fastticks=true/false overrides the default 'auto' (= on iff
+            // sim.autorun): unthrottled ticking via MinecraftServerFastTickMixin
+            // so scenarios run at CPU speed instead of real-time 20 TPS.
+            property 'sim.autorun', (project.findProperty('sim.autorun') ?: 'false').toString()
+            property 'sim.scenario', (project.findProperty('sim.scenario') ?: '').toString()
+            property 'sim.suite', (project.findProperty('sim.suite') ?: 'core').toString()
+            property 'sim.coverlog', (project.findProperty('sim.coverlog') ?: 'false').toString()
+            property 'sim.suplog', (project.findProperty('sim.suplog') ?: 'false').toString()
+            property 'sim.ailog', (project.findProperty('sim.ailog') ?: 'false').toString()
+            property 'sim.statedlog', (project.findProperty('sim.statedlog') ?: 'false').toString()
+            property 'sim.dmglog', (project.findProperty('sim.dmglog') ?: 'false').toString()
+            property 'sim.fastticks', (project.findProperty('sim.fastticks') ?: 'auto').toString()
         }
 
         // This run config launches GameTestServer and runs all registered gametests, then exits.
@@ -124,7 +144,13 @@ repositories {
 
 dependencies {
     minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
-    implementation fileTree(dir: 'libs', include: '*.jar')
+    // All libs jars are compile-time only. ForgeGradle's userdev classpath locator
+    // would otherwise load them as mods in dev runs, where they hard-fail:
+    // pointblank needs geckolib (absent) and TaCZ's SRG-refmapped mixins cannot
+    // resolve against mojmap userdev classes. Integration is reflection-guarded at
+    // runtime (GunIntegration/YsmCompat); real gun behavior is tested on the
+    // deployed instances, which install these mods properly.
+    compileOnly fileTree(dir: 'libs', include: ['pointblank*.jar', 'tacz*.jar', 'ysm*.jar'])
     annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
 }
 

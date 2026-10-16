@@ -17,6 +17,13 @@ public class StevesArmyConfig {
     public static final ForgeConfigSpec.DoubleValue AIM_QUALITY_TARGET_MOVE_PENALTY;
     public static final ForgeConfigSpec.DoubleValue AIM_QUALITY_SWITCH_RESET;
     public static final ForgeConfigSpec.DoubleValue TARGET_SWITCH_IMPROVEMENT;
+    public static final ForgeConfigSpec.IntValue MG_DIRECT_BURST_SHOTS;
+    public static final ForgeConfigSpec.IntValue MG_DIRECT_RECOVERY_TICKS;
+    public static final ForgeConfigSpec.DoubleValue MG_AIM_QUALITY_THRESHOLD_SCALE;
+    public static final ForgeConfigSpec.DoubleValue MG_TARGET_MOVE_PENALTY_SCALE;
+    public static final ForgeConfigSpec.DoubleValue MG_AIM_BUILD_RATE_SCALE;
+    public static final ForgeConfigSpec.DoubleValue MG_RECOIL_AIM_LOSS_SCALE;
+    public static final ForgeConfigSpec.BooleanValue CRAWL_STANCE_RECOIL;
     public static final ForgeConfigSpec.IntValue TARGET_REEVALUATE_INTERVAL;
 
     public static final ForgeConfigSpec.BooleanValue DYNAMIC_FIRING_ENABLED;
@@ -31,6 +38,8 @@ public class StevesArmyConfig {
     public static final ForgeConfigSpec.IntValue FIRING_MISS_STREAK_CAP;
     public static final ForgeConfigSpec.DoubleValue FIRING_MISS_STREAK_RECOVERY_SCALE;
     public static final ForgeConfigSpec.IntValue FIRING_MISS_STREAK_DECAY_TICKS;
+    public static final ForgeConfigSpec.BooleanValue MG_SUPPRESSION_ROUND_ROBIN;
+    public static final ForgeConfigSpec.IntValue MG_SUPPRESSION_ROTATION_SIZE;
 
     /** How a suppressed soldier reacts when returning direct fire. */
     public enum SuppressedFireMode { SPRAY, HOLD }
@@ -43,6 +52,61 @@ public class StevesArmyConfig {
     public static final ForgeConfigSpec.BooleanValue MONSTERS_ATTACK_SOLDIERS;
     public static final ForgeConfigSpec.DoubleValue BASIC_DETECTION_DISTANCE;
     public static final ForgeConfigSpec.DoubleValue MACHINE_GUNNER_DETECTION_DISTANCE;
+
+    public static final ForgeConfigSpec.BooleanValue DANGER_MAP_ENABLED;
+    public static final ForgeConfigSpec.DoubleValue DANGER_AMBIENT_RADIUS;
+    public static final ForgeConfigSpec.IntValue DANGER_RAY_BUDGET_PER_TICK;
+    public static final ForgeConfigSpec.IntValue DANGER_CELL_TTL_TICKS;
+    public static final ForgeConfigSpec.IntValue DANGER_MAX_THREATS;
+    public static final ForgeConfigSpec.DoubleValue DANGER_THREAT_RANGE;
+    public static final ForgeConfigSpec.DoubleValue DANGER_PATH_ANTI_TANK_WEIGHT;
+    public static final ForgeConfigSpec.DoubleValue DANGER_PATH_SUPPORT_WEIGHT;
+    public static final ForgeConfigSpec.DoubleValue DANGER_PATH_RIFLEMAN_WEIGHT;
+    public static final ForgeConfigSpec.DoubleValue DANGER_PATH_MACHINE_GUNNER_WEIGHT;
+    public static final ForgeConfigSpec.DoubleValue DANGER_PATH_GARRISON_WEIGHT;
+    public static final ForgeConfigSpec.BooleanValue DANGER_TRAVEL_RESPONSE;
+    public static final ForgeConfigSpec.IntValue DANGER_TRAVEL_REROUTE_COOLDOWN_TICKS;
+    public static final ForgeConfigSpec.DoubleValue DANGER_TRAVEL_SUPPRESSION_GAIN;
+
+    public static final ForgeConfigSpec.DoubleValue CLOSE_COMBAT_RANGE;
+    public static final ForgeConfigSpec.DoubleValue CLOSE_COMBAT_EXIT_RANGE;
+    public static final ForgeConfigSpec.DoubleValue CQB_EMERGENCY_RANGE;
+    public static final ForgeConfigSpec.DoubleValue CQB_OVERRUN_RANGE;
+    public static final ForgeConfigSpec.DoubleValue CQB_DOCK_FINISH_THRESHOLD;
+    public static final ForgeConfigSpec.IntValue CQB_HOLD_NO_SHOT_TIMEOUT_TICKS;
+    public static final ForgeConfigSpec.IntValue CQB_HOLD_RELEASE_COOLDOWN_TICKS;
+    public static final ForgeConfigSpec.IntValue CQB_HOLD_FREEZE_GRACE_TICKS;
+
+    public static final ForgeConfigSpec.BooleanValue SQUAD_CONTACT_PLAN_ENABLED;
+    public static final ForgeConfigSpec.DoubleValue CONTACT_COORDINATION_RANGE;
+    public static final ForgeConfigSpec.DoubleValue CONTACT_DANGER_ARC_DEGREES;
+
+    public static final ForgeConfigSpec.BooleanValue EXPOSED_COMBAT_ENABLED;
+    public static final ForgeConfigSpec.IntValue EXPOSED_PLANT_MIN_TICKS;
+    public static final ForgeConfigSpec.IntValue EXPOSED_ADJUST_WINDOW_TICKS;
+    public static final ForgeConfigSpec.IntValue EXPOSED_ADJUST_MAX_ATTEMPTS;
+    public static final ForgeConfigSpec.IntValue EXPOSED_ADJUST_TIMEOUT_TICKS;
+    public static final ForgeConfigSpec.DoubleValue EXPOSED_SIDESTEP_BLOCKS;
+    public static final ForgeConfigSpec.DoubleValue EXPOSED_WITHDRAW_DISTANCE;
+    public static final ForgeConfigSpec.IntValue EXPOSED_WITHDRAW_TIMEOUT_TICKS;
+    public static final ForgeConfigSpec.BooleanValue SQUAD_BOUNDING_ENABLED;
+    public static final ForgeConfigSpec.IntValue SQUAD_BOUND_COVER_WINDOW_TICKS;
+    public static final ForgeConfigSpec.IntValue SQUAD_BOUND_COVER_WAIT_TICKS;
+    public static final ForgeConfigSpec.IntValue SQUAD_BOUND_MAX_TICKS;
+    public static final ForgeConfigSpec.DoubleValue SQUAD_BOUND_THREAT_RANGE;
+    public static final ForgeConfigSpec.IntValue HOLD_MARCH_DWELL_TICKS;
+    public static final ForgeConfigSpec.BooleanValue CQB_DOORWAY_QUEUE_ENABLED;
+    public static final ForgeConfigSpec.DoubleValue CQB_DOORWAY_SPACING;
+    public static final ForgeConfigSpec.BooleanValue CQB_CORNER_WATCH_ENABLED;
+    public static final ForgeConfigSpec.IntValue CQB_LOST_CONTACT_WATCH_TICKS;
+    public static final ForgeConfigSpec.BooleanValue ATTACK_CLEAR_ENABLED;
+    public static final ForgeConfigSpec.IntValue ATTACK_CLEAR_RADIUS;
+    public static final ForgeConfigSpec.IntValue ATTACK_CLEAR_AWARENESS;
+    public static final ForgeConfigSpec.IntValue ATTACK_CLEAR_RAY_BUDGET;
+    public static final ForgeConfigSpec.IntValue ATTACK_CLEAR_SETTLE_TICKS;
+    public static final ForgeConfigSpec.IntValue ATTACK_CLEAR_STALL_TICKS;
+    public static final ForgeConfigSpec.DoubleValue CLOSE_COMBAT_SEEK_RADIUS;
+    public static final ForgeConfigSpec.IntValue CLOSE_COMBAT_REEVAL_INTERVAL_TICKS;
 
     public static final ForgeConfigSpec.DoubleValue SPACING_DISTANCE;
 
@@ -101,6 +165,7 @@ public class StevesArmyConfig {
     public static final ForgeConfigSpec.ConfigValue<java.util.List<? extends String>> ARMOR_AT_GUN_PATTERNS;
     public static final ForgeConfigSpec.ConfigValue<java.util.List<? extends String>> SIDEARM_GUN_PATTERNS;
     public static final ForgeConfigSpec.BooleanValue SOLDIER_DEATH_DROPS;
+    public static final ForgeConfigSpec.BooleanValue SWAP_SYNCS_HEALTH;
     public static final ForgeConfigSpec.EnumValue<ArmorDoctrineOverride> ARMOR_DOCTRINE_OVERRIDE;
     public static final ForgeConfigSpec.BooleanValue OCCUPANCY_VEHICLE_DETECTION;
     public static final ForgeConfigSpec.BooleanValue SBW_COMPAT_ENABLED;
@@ -213,6 +278,52 @@ public class StevesArmyConfig {
                      "Lower values = more responsive but higher CPU usage.")
             .defineInRange("targetReevaluateInterval", 20, 5, 100);
 
+        MG_DIRECT_BURST_SHOTS = BUILDER
+            .comment("Burst length for suppressive machine guns in DIRECT fire (0 = legacy 5-shot profile).",
+                     "MGs should hose at an active target the way they do in suppression: long",
+                     "aimed bursts instead of the shared 5-shot profile. Default: 10")
+            .defineInRange("mgDirectBurstShots", 10, 0, 30);
+
+        MG_DIRECT_RECOVERY_TICKS = BUILDER
+            .comment("Inter-burst recovery for suppressive machine guns in DIRECT fire (0 = legacy 10).",
+                     "Default: 6")
+            .defineInRange("mgDirectRecoveryTicks", 6, 0, 40);
+
+        MG_AIM_QUALITY_THRESHOLD_SCALE = BUILDER
+            .comment("Aim-quality gate cap for machine gunners (0 = standard path).",
+                     "MG doctrine is to open up early and walk fire onto the target, so the",
+                     "burst-start gate is capped like SUPPRESSIVE discipline: shotThreshold",
+                     "uses at most this fraction of targetAimQuality. Default: 0.20")
+            .defineInRange("mgAimQualityThresholdScale", 0.20, 0.0, 1.0);
+
+        MG_TARGET_MOVE_PENALTY_SCALE = BUILDER
+            .comment("Scales the target-moving aim decay for machine gunners (1.0 = standard).",
+                     "Tracking fire is the MG's job: without relief the per-tick decay matches",
+                     "the build rate at range and the gunner starves at the gate. Default: 0.4")
+            .defineInRange("mgTargetMovePenaltyScale", 0.4, 0.0, 1.0);
+
+        MG_AIM_BUILD_RATE_SCALE = BUILDER
+            .comment("Aim-quality build-rate multiplier for machine gunners (1.0 = standard).",
+                     "Belt-fed guns stay on target; raises the equilibrium quality at range",
+                     "so sustained bursts survive. Default: 1.5")
+            .defineInRange("mgAimBuildRateScale", 1.5, 1.0, 3.0);
+
+        MG_RECOIL_AIM_LOSS_SCALE = BUILDER
+            .comment("Scales the per-shot recoil aim loss for machine gunners (1.0 = standard).",
+                     "A stationary gunner has the bipod down - the M249's TaCZ recoil (0.4/0.3)",
+                     "charges the full shoulder-fire penalty today and collapses bursts after",
+                     "1-2 shots. Stacks with the crawl multiplier while low-crouching.",
+                     "Default: 0.5")
+            .defineInRange("mgRecoilAimLossScale", 0.5, 0.0, 2.0);
+
+        CRAWL_STANCE_RECOIL = BUILDER
+            .comment("Mirror TaCZ's per-gun crawl_recoil_multiplier into the aim model: while",
+                     "low-crouching (the duck/crawl pose), the per-shot recoil aim loss is",
+                     "multiplied by the gun's crawl_recoil_multiplier (M249: 0.1). Prone keeps",
+                     "its own 0.45 multiplier. Standing in the open pays the full penalty.",
+                     "Default: true")
+            .define("crawlStanceRecoil", true);
+
         BUILDER.pop();
 
         BUILDER.push("dynamic_firing");
@@ -287,6 +398,20 @@ public class StevesArmyConfig {
                      "Default: 100 (5 seconds per step)")
             .defineInRange("missStreakDecayTicks", 100, 20, 600);
 
+        MG_SUPPRESSION_ROUND_ROBIN = BUILDER
+            .comment("Machine gunners rotate suppression bursts round-robin across known threats'",
+                     " last-seen positions instead of stacking every burst on one contact.",
+                     "Unsuppressed (unclaimed, not-yet-pinned) enemies come first in the",
+                     "rotation; riflemen and heavy-ping fire are unchanged.",
+                     "Default: true")
+            .define("mgSuppressionRoundRobin", true);
+
+        MG_SUPPRESSION_ROTATION_SIZE = BUILDER
+            .comment("Maximum number of threats in a machine gunner's round-robin suppression",
+                     "rotation (2 to 6). Single-contact fights are unaffected.",
+                     "Default: 3")
+            .defineInRange("mgSuppressionRotationSize", 3, 2, 6);
+
         BUILDER.pop();
         
         BUILDER.push("friendly_fire");
@@ -355,8 +480,368 @@ public class StevesArmyConfig {
                      "Machine gunners retain a longer detection range for area suppression.",
                      "Default: 96.0 blocks")
             .defineInRange("machineGunnerDetectionDistance", 96.0, 1.0, 256.0);
-        
+
+        BUILDER.push("danger_map");
+
+        DANGER_MAP_ENABLED = BUILDER
+            .comment("Per-squad spatial danger map: which nearby positions are exposed to",
+                     "line-of-sight from the squad's known threats, probed at leg and eye heights.",
+                     "Pure intelligence - it changes no behavior by itself; AI consumers read it",
+                     "through later features.",
+                     "Default: true")
+            .define("dangerMapEnabled", true);
+
+        DANGER_AMBIENT_RADIUS = BUILDER
+            .comment("Radius (blocks) around the squad anchor the ambient baker keeps warm.",
+                     "Default: 24.0 blocks")
+            .defineInRange("dangerAmbientRadius", 24.0, 8.0, 64.0);
+
+        DANGER_RAY_BUDGET_PER_TICK = BUILDER
+            .comment("Global per-tick line-of-sight ray budget shared by every squad's danger map.",
+                     "Baking defers when the budget runs out; queries never spend rays.",
+                     "Sized for the 6-ray body-span fan: ~85 cells/tick for one threat,",
+                     "still leaving head-room for two concurrent squads.",
+                     "Default: 512 rays/tick")
+            .defineInRange("dangerRayBudgetPerTick", 512, 16, 8192);
+
+        DANGER_CELL_TTL_TICKS = BUILDER
+            .comment("How long a baked danger cell stays fresh before re-baking.",
+                     "Default: 60 ticks (3 s)")
+            .defineInRange("dangerCellTtlTicks", 60, 20, 400);
+
+        DANGER_MAX_THREATS = BUILDER
+            .comment("Maximum number of tracked threats the map bakes shadows for (strongest first).",
+                     "Default: 6")
+            .defineInRange("dangerMaxThreats", 6, 1, 12);
+
+        DANGER_THREAT_RANGE = BUILDER
+            .comment("Threats farther than this from the squad anchor are ignored by the map.",
+                     "Default: 96.0 blocks")
+            .defineInRange("dangerThreatRange", 96.0, 16.0, 256.0);
+
+        DANGER_PATH_ANTI_TANK_WEIGHT = BUILDER
+            .comment("Pathfinding danger cost for ANTI_TANK soldiers: a fully-exposed corridor cell",
+                     "adds this much malus (vanilla fire-type malus is ~8-16). Tank hunters approach",
+                     "hard targets through covered ground; 0 disables.",
+                     "Default: 4.0")
+            .defineInRange("dangerPathAntiTankWeight", 4.0, 0.0, 16.0);
+
+        DANGER_PATH_SUPPORT_WEIGHT = BUILDER
+            .comment("Pathfinding danger cost for SUPPORT soldiers - strongest avoidance: logistics",
+                     "routes through low-danger ground. 0 disables.",
+                     "Default: 6.0")
+            .defineInRange("dangerPathSupportWeight", 6.0, 0.0, 16.0);
+
+        DANGER_PATH_RIFLEMAN_WEIGHT = BUILDER
+            .comment("Pathfinding danger cost for RIFLEMAN soldiers - lightest avoidance: assault",
+                     "roles cross exposed ground when the objective demands it, but prefer shadow",
+                     "when the detour is cheap. 0 disables.",
+                     "Default: 1.5")
+            .defineInRange("dangerPathRiflemanWeight", 1.5, 0.0, 16.0);
+
+        DANGER_PATH_MACHINE_GUNNER_WEIGHT = BUILDER
+            .comment("Pathfinding danger cost for MACHINE_GUNNER soldiers: base-of-fire doctrine",
+                     "is more cautious than riflemen but still closes to its lane. 0 disables.",
+                     "Default: 3.0")
+            .defineInRange("dangerPathMachineGunnerWeight", 3.0, 0.0, 16.0);
+
+        DANGER_PATH_GARRISON_WEIGHT = BUILDER
+            .comment("Pathfinding danger cost for GARRISON soldiers: mostly stationary, but their",
+                     "occasional repositioning prefers low-danger ground. 0 disables.",
+                     "Default: 2.0")
+            .defineInRange("dangerPathGarrisonWeight", 2.0, 0.0, 16.0);
+
+        DANGER_TRAVEL_RESPONSE = BUILDER
+            .comment("Suppressed-traveler doctrine: a soldier moving under fire keeps moving -",
+                     "the squad map bakes the shooter from the near-misses, the path re-routes",
+                     "around the new shadow, and the soldier crawls through any stretch where",
+                     "the map says crawling hides - hold marches, ping moves, and the approach",
+                     "to cover alike. Pinned soldiers still dive for cover, but crawl there low.",
+                     "Cover-seek waits until pinned or arrival. false restores stop-at-cover doctrine.",
+                     "Default: true")
+            .define("dangerTravelResponse", true);
+
+        DANGER_TRAVEL_REROUTE_COOLDOWN_TICKS = BUILDER
+            .comment("Minimum ticks between travel re-route requests for one soldier, so sustained",
+                     "fire re-routes the march without recomputing a path on every near-miss.",
+                     "Default: 60 ticks (3 s)")
+            .defineInRange("dangerTravelRerouteCooldownTicks", 60, 20, 200);
+
+        DANGER_TRAVEL_SUPPRESSION_GAIN = BUILDER
+            .comment("Suppression gain multiplier for soldiers actively traveling (hold march or",
+                     "GO_TO ping move). Real bullet speeds pin a stationary soldier in ~2-3",
+                     "near-misses; a moving soldier is a harder target to suppress, so the",
+                     "pressured band - where re-routing and no-cover-dive apply - lasts seconds",
+                     "instead of a fraction of a second. 1.0 disables the resistance.",
+                     "Default: 0.35")
+            .defineInRange("dangerTravelSuppressionGain", 0.35, 0.05, 1.0);
+
+        BUILDER.pop();
+
 BUILDER.pop();
+
+        BUILDER.push("close_combat");
+
+        CLOSE_COMBAT_RANGE = BUILDER
+            .comment("Radius (blocks) of the close-combat context: inside it soldiers reassess targets",
+                     "faster, keep cover-seek reasoning alive, and bound their movements to small",
+                     "adjustments. A wider hysteresis exit (closeCombatExitRange) stops behavior",
+                     "flapping at the boundary. 0 disables the context.",
+                     "Default: 16.0 blocks")
+            .defineInRange("closeCombatRange", 16.0, 0.0, 48.0);
+
+        CLOSE_COMBAT_EXIT_RANGE = BUILDER
+            .comment("Hysteresis exit for the close-combat context: the context stays on until the",
+                     "nearest known threat is farther than this. Must be >= closeCombatRange.",
+                     "Default: 20.0 blocks")
+            .defineInRange("closeCombatExitRange", 20.0, 4.0, 64.0);
+
+        CQB_EMERGENCY_RANGE = BUILDER
+            .comment("Emergency engagement range: a visible enemy inside this distance may latch the",
+                     "emergency engagement hold (stop and fight) when the soldier can actually shoot.",
+                     "Manual CQB formation no longer freeze-holds at any distance - it is a mobility",
+                     "doctrine (caution steering, faster reassessment) that keeps cover use and spacing.",
+                     "Default: 5.0 blocks")
+            .defineInRange("cqbEmergencyRange", 5.0, 1.0, 16.0);
+
+        CQB_OVERRUN_RANGE = BUILDER
+            .comment("Overrun range: a visible enemy inside this distance freezes movement immediately,",
+                     "even mid-approach - survival outranks finishing the dock.",
+                     "Default: 3.0 blocks")
+            .defineInRange("cqbOverrunRange", 3.0, 1.0, 16.0);
+
+        CQB_DOCK_FINISH_THRESHOLD = BUILDER
+            .comment("When the emergency hold latches while a cover approach is already this close to",
+                     "its slot, the approach finishes first: the last step into protection beats",
+                     "engaging from the open. Docking defers only while the threat is beyond",
+                     "cqbOverrunRange.",
+                     "Default: 2.5 blocks")
+            .defineInRange("cqbDockFinishThreshold", 2.5, 0.5, 8.0);
+
+        CQB_HOLD_NO_SHOT_TIMEOUT_TICKS = BUILDER
+            .comment("An engagement hold that produces no burst for this many ticks releases itself so",
+                     "the soldier can reposition (blocked lane, obstructed arc) instead of standing",
+                     "frozen while unable to shoot. Any started burst resets the clock.",
+                     "Default: 60 ticks (3 s)")
+            .defineInRange("cqbHoldNoShotTimeoutTicks", 60, 20, 400);
+
+        CQB_HOLD_RELEASE_COOLDOWN_TICKS = BUILDER
+            .comment("After a no-shot release the soldier waits this long before the emergency hold may",
+                     "latch again, so hold-release-relatch cannot oscillate in place.",
+                     "Default: 40 ticks (2 s)")
+            .defineInRange("cqbHoldReleaseCooldownTicks", 40, 0, 200);
+
+        CQB_HOLD_FREEZE_GRACE_TICKS = BUILDER
+            .comment("The engagement hold freezes movement only within this window of actual shot",
+                     "activity (latch or last burst). Past the grace, movement resumes while the hold",
+                     "flag stays latched, so a hold that cannot produce fire never blocks cover",
+                     "seeking; a started burst re-arms the freeze immediately.",
+                     "Default: 20 ticks (1 s)")
+            .defineInRange("cqbHoldFreezeGraceTicks", 20, 0, 100);
+
+        SQUAD_CONTACT_PLAN_ENABLED = BUILDER
+            .comment("Contact plan (INC 2): one close contact per squad with an assigned base of fire",
+                     "and checker; soldiers may not advance across the contact's danger arc without",
+                     "support (LoS onto the threat or a recent squad shot) unless an emergency bypass",
+                     "applies (point-blank overrun, suppressed/downed mate, STALLED latch).",
+                     "Default: true")
+            .define("squadContactPlanEnabled", true);
+
+        CONTACT_COORDINATION_RANGE = BUILDER
+            .comment("A threat within this band of the squad opens/keeps the close contact plan;",
+                     "beyond it the legacy soft-wait street doctrine applies.",
+                     "Default: 16.0 blocks")
+            .defineInRange("contactCoordinationRange", 16.0, 6.0, 48.0);
+
+        CONTACT_DANGER_ARC_DEGREES = BUILDER
+            .comment("Half-angle of the threat's danger apex cone. An advance whose segment crosses",
+                     "the cone is denied unless base-of-fire support or an emergency bypass covers it.",
+                     "Default: 35.0 degrees")
+            .defineInRange("contactDangerArcDegrees", 35.0, 10.0, 90.0);
+
+        CLOSE_COMBAT_SEEK_RADIUS = BUILDER
+            .comment("Cover searches inside the close-combat context (or an emergency-range enemy)",
+                     "are bounded to this radius: close-range protection must be a short, useful",
+                     "movement, not a long relocation under fire. Wide enough to still see real",
+                     "protection near a squad position; small enough to exclude far-side pockets.",
+                     "Default: 14.0 blocks")
+            .defineInRange("closeCombatSeekRadius", 14.0, 4.0, 24.0);
+
+        CLOSE_COMBAT_REEVAL_INTERVAL_TICKS = BUILDER
+            .comment("Target re-evaluation interval inside the close-combat context (ordinary play",
+                     "uses targeting.targetReevaluateInterval). Close quarters change faster than",
+                     "open field fights.",
+                     "Default: 10 ticks")
+            .defineInRange("closeCombatReevalIntervalTicks", 10, 4, 40);
+
+        BUILDER.pop();
+
+        BUILDER.push("cqb");
+
+        CQB_DOORWAY_QUEUE_ENABLED = BUILDER
+            .comment("Doorway queueing: a soldier moving under CQB caution pauses before a",
+                     "wall-narrow passage (door, breach) while a squadmate is still inside or",
+                     "just past it, so the stack crosses single-file instead of clumping in",
+                     "the fatal funnel.",
+                     "Default: true")
+            .define("cqbDoorwayQueueEnabled", true);
+
+        CQB_DOORWAY_SPACING = BUILDER
+            .comment("Distance from the doorway center at which a squadmate holds the passage",
+                     "occupied for queueing purposes. Must exceed one body length so the",
+                     "follower freezes his creep before the leader has cleared the frame.",
+                     "Default: 3.5 blocks")
+            .defineInRange("cqbDoorwaySpacing", 3.5, 1.0, 6.0);
+
+        CQB_CORNER_WATCH_ENABLED = BUILDER
+            .comment("Corner pie-slicing: while moving under CQB caution, a soldier whose path",
+                     "bends within a few blocks pre-aims the arc the corner opens into (toward",
+                     "the known threat side) instead of staring at the wall he is hugging.",
+                     "Default: true")
+            .define("cqbCornerWatchEnabled", true);
+
+        CQB_LOST_CONTACT_WATCH_TICKS = BUILDER
+            .comment("Lost-contact watch: after close-quarters contact breaks (target visible,",
+                     "then gone), the soldier holds position and keeps his aim on the last-known",
+                     "position for this long before resuming routine behavior.",
+                     "Default: 80 ticks (4 s)")
+            .defineInRange("cqbLostContactWatchTicks", 80, 20, 200);
+
+        BUILDER.pop();
+
+        BUILDER.push("attack_clear");
+
+        ATTACK_CLEAR_ENABLED = BUILDER
+            .comment("Attack clearing doctrine: an ATTACK ping defines a bounded area to advance into,",
+                     "actively clear (observe blind spots, resolve contact), then secure - instead of",
+                     "completing the moment soldiers get within 4 blocks of the marker.",
+                     "false restores proximity completion.",
+                     "Default: true")
+            .define("attackClearEnabled", true);
+
+        ATTACK_CLEAR_RADIUS = BUILDER
+            .comment("Clearing boundary radius (blocks) around the ping. The area is flood-filled",
+                     "through walkable space, so walls bound it even when the radius would not.",
+                     "Default: 8 blocks")
+            .defineInRange("attackClearRadius", 8, 4, 16);
+
+        ATTACK_CLEAR_AWARENESS = BUILDER
+            .comment("Close-combat awareness range (blocks): blind-spot observation, threat",
+                     "resolution, and visibility checks use this range, separately from the",
+                     "order's clearing boundary.",
+                     "Default: 16 blocks")
+            .defineInRange("attackClearAwareness", 16, 8, 32);
+
+        ATTACK_CLEAR_RAY_BUDGET = BUILDER
+            .comment("Visibility rays per server tick spent observing unchecked blind spots across",
+                     "all active clearing orders. 0 disables ray observation (proximity only).",
+                     "Default: 24")
+            .defineInRange("attackClearRayBudget", 24, 0, 128);
+
+        ATTACK_CLEAR_SETTLE_TICKS = BUILDER
+            .comment("Once the area is reached, checked, and free of unresolved threats, the squad",
+                     "must stay settled this long before the order completes as Area secured.",
+                     "Default: 80 ticks (4 s)")
+            .defineInRange("attackClearSettleTicks", 80, 20, 400);
+
+        ATTACK_CLEAR_STALL_TICKS = BUILDER
+            .comment("No blind spot checked, no threat resolved, and no soldier progress for this",
+                     "long marks the attack STALLED (reported once; the order persists).",
+                     "Default: 600 ticks (30 s)")
+            .defineInRange("attackClearStallTicks", 600, 100, 2400);
+
+        BUILDER.pop();
+
+        BUILDER.push("exposed_combat");
+
+        EXPOSED_COMBAT_ENABLED = BUILDER
+            .comment("Deliberate no-cover combat doctrine: soldiers without usable cover plant and",
+                     "engage, make bounded sidesteps when their lane is blocked, withdraw from",
+                     "overrunning threats, and hold deliberately instead of standing frozen.",
+                     "false restores stand-in-place fallback.",
+                     "Default: true")
+            .define("exposedCombatEnabled", true);
+
+        EXPOSED_PLANT_MIN_TICKS = BUILDER
+            .comment("A chosen plant/hold action persists at least this long before re-deciding, so",
+                     "exposed soldiers act with purpose instead of strafing constantly.",
+                     "Default: 40 ticks (2 s)")
+            .defineInRange("exposedPlantMinTicks", 40, 10, 200);
+
+        EXPOSED_ADJUST_WINDOW_TICKS = BUILDER
+            .comment("How long a friendly-fire-blocked shot stays remembered as a blocked lane.",
+                     "Default: 40 ticks (2 s)")
+            .defineInRange("exposedAdjustWindowTicks", 40, 10, 200);
+
+        EXPOSED_ADJUST_MAX_ATTEMPTS = BUILDER
+            .comment("Bounded sidesteps per engagement: a failed adjustment never loops - after the",
+                     "cap the soldier plants, switches target, or holds.",
+                     "Default: 1")
+            .defineInRange("exposedAdjustMaxAttempts", 1, 0, 4);
+
+        EXPOSED_ADJUST_TIMEOUT_TICKS = BUILDER
+            .comment("A sidestep move that has not landed within this window is abandoned.",
+                     "Default: 30 ticks")
+            .defineInRange("exposedAdjustTimeoutTicks", 30, 10, 100);
+
+        EXPOSED_SIDESTEP_BLOCKS = BUILDER
+            .comment("Lateral reach of one bounded sidestep (blocks), perpendicular to the blocked",
+                     "aim direction, away from friendly bodies.",
+                     "Default: 2.5 blocks")
+            .defineInRange("exposedSidestepBlocks", 2.5, 0.5, 6.0);
+
+        EXPOSED_WITHDRAW_DISTANCE = BUILDER
+            .comment("Bounded retreat length when a threat overruns an exposed soldier (blocks).",
+                     "Default: 8.0 blocks")
+            .defineInRange("exposedWithdrawDistance", 8.0, 2.0, 24.0);
+
+        EXPOSED_WITHDRAW_TIMEOUT_TICKS = BUILDER
+            .comment("A withdrawal that has not ended within this window is abandoned.",
+                     "Default: 60 ticks (3 s)")
+            .defineInRange("exposedWithdrawTimeoutTicks", 60, 20, 200);
+
+        BUILDER.pop();
+
+        BUILDER.push("squad_movement");
+
+        SQUAD_BOUNDING_ENABLED = BUILDER
+            .comment("Squad street-crossing doctrine: within a fire team advancing across a hot",
+                     "lane, one soldier bounds at a time and the others hold overwatch; a bounder",
+                     "advances under real covering fire (a teammate actually shooting), machine",
+                     "gunners anchor the overwatch, and lone soldiers bypass the coordinator.",
+                     "Default: true")
+            .define("squadBoundingEnabled", true);
+
+        SQUAD_BOUND_COVER_WINDOW_TICKS = BUILDER
+            .comment("A teammate's shot counts as covering fire for this long after it fires.",
+                     "Default: 60 ticks (3 s)")
+            .defineInRange("squadBoundCoverWindowTicks", 60, 10, 200);
+
+        SQUAD_BOUND_COVER_WAIT_TICKS = BUILDER
+            .comment("A bounder without covering fire waits this long before advancing anyway.",
+                     "Default: 60 ticks (3 s)")
+            .defineInRange("squadBoundCoverWaitTicks", 60, 0, 200);
+
+        SQUAD_BOUND_MAX_TICKS = BUILDER
+            .comment("A bound that has not completed within this window is released so the next",
+                     "soldier (rotation) gets the lane. No permanent stalls.",
+                     "Default: 200 ticks (10 s)")
+            .defineInRange("squadBoundMaxTicks", 200, 40, 600);
+
+        HOLD_MARCH_DWELL_TICKS = BUILDER
+            .comment("A docked soldier with the hold point still far away resumes the march after",
+                     "this much quiet dwell time in cover: a dock is a pause under fire, not a",
+                     "terminus (street-crossing doctrine). The dwell resets while suppressed or in",
+                     "the close-combat context; live combat always owns the soldier first.",
+                     "Default: 80 ticks (4 s)")
+            .defineInRange("holdMarchDwellTicks", 80, 20, 400);
+
+        SQUAD_BOUND_THREAT_RANGE = BUILDER
+            .comment("Max distance for a squadmate to count as part of the same bound (blocks).",
+                     "Default: 32 blocks")
+            .defineInRange("squadBoundThreatRange", 32.0, 8.0, 64.0);
+
+        BUILDER.pop();
 
         BUILDER.push("spacing");
 
@@ -673,6 +1158,13 @@ BUILDER.pop();
                      "where they die instead of vanishing with it. Default: true.")
             .define("soldierDeathDrops", true);
 
+        SWAP_SYNCS_HEALTH = BUILDER
+            .comment("Player-soldier body swap carries health with the body: swapping into",
+                     "a wounded soldier leaves you at his hearts, and the body you leave",
+                     "behind keeps yours (so swapping back never heals you for free).",
+                     "Default: true.")
+            .define("swapSyncsHealth", true);
+
         ARMOR_DOCTRINE_OVERRIDE = BUILDER
             .comment("Force the reaction branch for testing: AUTO uses each squad's real",
                      "loadout; NO_AT makes every squad react as if it has no anti-armor",
@@ -952,6 +1444,34 @@ BUILDER.pop();
     public static float getAimQualitySwitchReset() {
         return AIM_QUALITY_SWITCH_RESET.get().floatValue();
     }
+
+    public static int getMgDirectBurstShots() {
+        return MG_DIRECT_BURST_SHOTS.get();
+    }
+
+    public static int getMgDirectRecoveryTicks() {
+        return MG_DIRECT_RECOVERY_TICKS.get();
+    }
+
+    public static float getMgAimQualityThresholdScale() {
+        return MG_AIM_QUALITY_THRESHOLD_SCALE.get().floatValue();
+    }
+
+    public static float getMgTargetMovePenaltyScale() {
+        return MG_TARGET_MOVE_PENALTY_SCALE.get().floatValue();
+    }
+
+    public static float getMgAimBuildRateScale() {
+        return MG_AIM_BUILD_RATE_SCALE.get().floatValue();
+    }
+
+    public static float getMgRecoilAimLossScale() {
+        return MG_RECOIL_AIM_LOSS_SCALE.get().floatValue();
+    }
+
+    public static boolean isCrawlStanceRecoilEnabled() {
+        return CRAWL_STANCE_RECOIL.get();
+    }
     
     public static float getTargetSwitchImprovement() {
         return TARGET_SWITCH_IMPROVEMENT.get().floatValue();
@@ -963,6 +1483,14 @@ BUILDER.pop();
 
     public static boolean isDynamicFiringEnabled() {
         return DYNAMIC_FIRING_ENABLED.get();
+    }
+
+    public static boolean isMgSuppressionRoundRobinEnabled() {
+        return MG_SUPPRESSION_ROUND_ROBIN.get();
+    }
+
+    public static int getMgSuppressionRotationSize() {
+        return MG_SUPPRESSION_ROTATION_SIZE.get();
     }
 
     public static float getFiringPersonalityStrength() {
@@ -1035,6 +1563,210 @@ BUILDER.pop();
 
     public static double getBasicDetectionDistance() {
         return BASIC_DETECTION_DISTANCE.get();
+    }
+
+    public static boolean isDangerMapEnabled() {
+        return DANGER_MAP_ENABLED.get();
+    }
+
+    public static double getDangerAmbientRadius() {
+        return DANGER_AMBIENT_RADIUS.get();
+    }
+
+    public static int getDangerRayBudgetPerTick() {
+        return DANGER_RAY_BUDGET_PER_TICK.get();
+    }
+
+    public static long getDangerCellTtlTicks() {
+        return DANGER_CELL_TTL_TICKS.get();
+    }
+
+    public static int getDangerMaxThreats() {
+        return DANGER_MAX_THREATS.get();
+    }
+
+    public static double getDangerThreatRange() {
+        return DANGER_THREAT_RANGE.get();
+    }
+
+    public static double getDangerPathAntiTankWeight() {
+        return DANGER_PATH_ANTI_TANK_WEIGHT.get();
+    }
+
+    public static double getDangerPathSupportWeight() {
+        return DANGER_PATH_SUPPORT_WEIGHT.get();
+    }
+
+    public static double getDangerPathRiflemanWeight() {
+        return DANGER_PATH_RIFLEMAN_WEIGHT.get();
+    }
+
+    public static double getDangerPathMachineGunnerWeight() {
+        return DANGER_PATH_MACHINE_GUNNER_WEIGHT.get();
+    }
+
+    public static double getDangerPathGarrisonWeight() {
+        return DANGER_PATH_GARRISON_WEIGHT.get();
+    }
+
+    public static boolean isDangerTravelResponseEnabled() {
+        return DANGER_TRAVEL_RESPONSE.get();
+    }
+
+    public static int getDangerTravelRerouteCooldownTicks() {
+        return DANGER_TRAVEL_REROUTE_COOLDOWN_TICKS.get();
+    }
+
+    public static double getDangerTravelSuppressionGain() {
+        return DANGER_TRAVEL_SUPPRESSION_GAIN.get();
+    }
+
+    public static double getCloseCombatRange() {
+        return CLOSE_COMBAT_RANGE.get();
+    }
+
+    public static double getCloseCombatExitRange() {
+        return CLOSE_COMBAT_EXIT_RANGE.get();
+    }
+
+    public static double getCqbEmergencyRange() {
+        return CQB_EMERGENCY_RANGE.get();
+    }
+
+    public static double getCqbOverrunRange() {
+        return CQB_OVERRUN_RANGE.get();
+    }
+
+    public static double getCqbDockFinishThreshold() {
+        return CQB_DOCK_FINISH_THRESHOLD.get();
+    }
+
+    public static int getCqbHoldNoShotTimeoutTicks() {
+        return CQB_HOLD_NO_SHOT_TIMEOUT_TICKS.get();
+    }
+
+    public static int getCqbHoldReleaseCooldownTicks() {
+        return CQB_HOLD_RELEASE_COOLDOWN_TICKS.get();
+    }
+
+    public static int getCqbHoldFreezeGraceTicks() {
+        return CQB_HOLD_FREEZE_GRACE_TICKS.get();
+    }
+
+    public static boolean isSquadContactPlanEnabled() {
+        return SQUAD_CONTACT_PLAN_ENABLED.get();
+    }
+
+    public static double getContactCoordinationRange() {
+        return CONTACT_COORDINATION_RANGE.get();
+    }
+
+    public static double getContactDangerArcDegrees() {
+        return CONTACT_DANGER_ARC_DEGREES.get();
+    }
+
+    public static boolean isExposedCombatEnabled() {
+        return EXPOSED_COMBAT_ENABLED.get();
+    }
+
+    public static int getExposedPlantMinTicks() {
+        return EXPOSED_PLANT_MIN_TICKS.get();
+    }
+
+    public static int getExposedAdjustWindowTicks() {
+        return EXPOSED_ADJUST_WINDOW_TICKS.get();
+    }
+
+    public static int getExposedAdjustMaxAttempts() {
+        return EXPOSED_ADJUST_MAX_ATTEMPTS.get();
+    }
+
+    public static int getExposedAdjustTimeoutTicks() {
+        return EXPOSED_ADJUST_TIMEOUT_TICKS.get();
+    }
+
+    public static double getExposedSidestepBlocks() {
+        return EXPOSED_SIDESTEP_BLOCKS.get();
+    }
+
+    public static double getExposedWithdrawDistance() {
+        return EXPOSED_WITHDRAW_DISTANCE.get();
+    }
+
+    public static int getExposedWithdrawTimeoutTicks() {
+        return EXPOSED_WITHDRAW_TIMEOUT_TICKS.get();
+    }
+
+    public static boolean isSquadBoundingEnabled() {
+        return SQUAD_BOUNDING_ENABLED.get();
+    }
+
+    public static int getSquadBoundCoverWindowTicks() {
+        return SQUAD_BOUND_COVER_WINDOW_TICKS.get();
+    }
+
+    public static int getSquadBoundCoverWaitTicks() {
+        return SQUAD_BOUND_COVER_WAIT_TICKS.get();
+    }
+
+    public static int getSquadBoundMaxTicks() {
+        return SQUAD_BOUND_MAX_TICKS.get();
+    }
+
+    public static double getSquadBoundThreatRange() {
+        return SQUAD_BOUND_THREAT_RANGE.get();
+    }
+
+    public static int getHoldMarchDwellTicks() {
+        return HOLD_MARCH_DWELL_TICKS.get();
+    }
+
+    public static boolean isCqbDoorwayQueueEnabled() {
+        return CQB_DOORWAY_QUEUE_ENABLED.get();
+    }
+
+    public static double getCqbDoorwaySpacing() {
+        return CQB_DOORWAY_SPACING.get();
+    }
+
+    public static boolean isCqbCornerWatchEnabled() {
+        return CQB_CORNER_WATCH_ENABLED.get();
+    }
+
+    public static int getCqbLostContactWatchTicks() {
+        return CQB_LOST_CONTACT_WATCH_TICKS.get();
+    }
+
+    public static boolean isAttackClearEnabled() {
+        return ATTACK_CLEAR_ENABLED.get();
+    }
+
+    public static int getAttackClearRadius() {
+        return ATTACK_CLEAR_RADIUS.get();
+    }
+
+    public static int getAttackClearAwareness() {
+        return ATTACK_CLEAR_AWARENESS.get();
+    }
+
+    public static int getAttackClearRayBudget() {
+        return ATTACK_CLEAR_RAY_BUDGET.get();
+    }
+
+    public static int getAttackClearSettleTicks() {
+        return ATTACK_CLEAR_SETTLE_TICKS.get();
+    }
+
+    public static int getAttackClearStallTicks() {
+        return ATTACK_CLEAR_STALL_TICKS.get();
+    }
+
+    public static double getCloseCombatSeekRadius() {
+        return CLOSE_COMBAT_SEEK_RADIUS.get();
+    }
+
+    public static int getCloseCombatReevalIntervalTicks() {
+        return CLOSE_COMBAT_REEVAL_INTERVAL_TICKS.get();
     }
 
     public static double getMachineGunnerDetectionDistance() {
@@ -1293,6 +2025,10 @@ BUILDER.pop();
 
     public static boolean isSoldierDeathDropsEnabled() {
         return SOLDIER_DEATH_DROPS.get();
+    }
+
+    public static boolean isSwapHealthSyncEnabled() {
+        return SWAP_SYNCS_HEALTH.get();
     }
 
     public static ArmorDoctrineOverride getArmorDoctrineOverride() {

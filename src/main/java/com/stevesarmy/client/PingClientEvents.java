@@ -313,12 +313,15 @@ public class PingClientEvents {
         if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_TRANSLUCENT_BLOCKS) {
             CombatDebugRenderer.render(event.getPoseStack(), event.getCamera(), event.getPartialTick());
             CoverDebugRenderer.render(event.getPoseStack(), event.getCamera());
+            CoverStateDebugRenderer.render(event.getPoseStack(), event.getCamera());
             SpacingDebugRenderer.render(event.getPoseStack(), event.getCamera());
             FireTeamSuppressionDebugRenderer.render(event.getPoseStack(), event.getCamera());
             VehicleCrewDebugRenderer.render(event.getPoseStack(), event.getCamera());
             ArmorDoctrineDebugRenderer.render(event.getPoseStack(), event.getCamera());
             SuppressPingDebugRenderer.render(event.getPoseStack(), event.getCamera());
             SidearmDebugRenderer.render(event.getPoseStack(), event.getCamera());
+            com.stevesarmy.client.DangerMapDebugRenderer.render(event.getPoseStack(), event.getCamera());
+            FovConeDebugRenderer.render(event.getPoseStack(), event.getCamera());
             CommandStickRenderer.render(event.getPoseStack(), event.getCamera(), event.getPartialTick());
         }
     }

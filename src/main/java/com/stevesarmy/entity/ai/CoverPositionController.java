@@ -39,7 +39,16 @@ public class CoverPositionController extends MoveControl {
 
     private String debugMoveSource = "none";
     private String debugMoveReason = "";
+
+    /** Sim-harness telemetry: which subsystem produced the current movement (and why). */
+    public String debugMoveSource() { return debugMoveSource; }
+    public String debugMoveReason() { return debugMoveReason; }
     private Vec3 debugLastSetVelocity = Vec3.ZERO;
+    // Sim-harness telemetry: how often the cover-anchor velocity actually engaged.
+    private int debugAnchorTicks;
+    private int debugAnchorPulls;
+    private double debugLastAnchorDistance = -1;
+    private int debugArrivals;
     private boolean controlledReturnToCover;
     private Vec3 coverAnchorTarget;
     private final CqbSteeringAdvisor steeringAdvisor = new CqbSteeringAdvisor();
@@ -63,7 +72,8 @@ public class CoverPositionController extends MoveControl {
 
     public void moveTo(Vec3 pos, double tolerance, double speed, String source, String reason) {
         this.coverAnchorTarget = null;
-        if (this.mob instanceof SoldierEntity soldier && soldier.isCqbEngagementHold()
+        if (this.mob instanceof SoldierEntity soldier && soldier.cqbHoldFreezeEffective()
+            && !shouldDeferCqbHold()
             && !"PeekController".equals(source)) {
             this.mob.getNavigation().stop();
             this.mob.setZza(0.0F);
@@ -75,7 +85,10 @@ public class CoverPositionController extends MoveControl {
             return;
         }
         if (isPreparingOrReloading()) {
-            if (!controlledReturnToCover && !isCoverApproachDuringReload()) {
+            if (controlledReturnToCover || isCoverApproachDuringReload()
+                || isFinishingCoverDockDuringReload()) {
+                beginMove(pos, tolerance, speed, source, reason, controlledReturnToCover);
+            } else {
                 stopForReload();
                 this.lastResult = MovementResult.FAILED;
                 this.lastFailureReason = FailureReason.RELOAD_INTERRUPTED;
@@ -91,6 +104,29 @@ public class CoverPositionController extends MoveControl {
 
     public void reassertControlledReturn() {
         this.controlledReturnToCover = true;
+    }
+
+    /**
+     * True while the emergency engagement hold should let movement run: an
+     * approach is in flight and either about to reach protection (dock finish)
+     * or the threat is not overrunning. A point-blank threat always outranks
+     * finishing the dock. Shared by the latch path (SoldierEntity), the
+     * per-tick freeze gate, and the moveTo veto so all three agree.
+     */
+    public boolean shouldDeferCqbHold() {
+        if (!(this.mob instanceof SoldierEntity soldier) || !soldier.isCqbEngagementHold()) {
+            return false;
+        }
+        net.minecraft.world.entity.LivingEntity threat = soldier.getTarget();
+        if (threat != null && threat.isAlive()
+            && soldier.distanceToSqr(threat) <= Mth.square(com.stevesarmy.StevesArmyConfig.getCqbOverrunRange())) {
+            return false;
+        }
+        if (this.lastResult != MovementResult.IN_PROGRESS) {
+            return false;
+        }
+        double finishSq = Mth.square(com.stevesarmy.StevesArmyConfig.getCqbDockFinishThreshold());
+        return this.mob.distanceToSqr(this.targetPos.x, this.targetPos.y, this.targetPos.z) <= finishSq;
     }
 
     private void beginMove(Vec3 pos, double tolerance, double speed, String source, String reason,
@@ -188,6 +224,7 @@ public class CoverPositionController extends MoveControl {
         this.lastFailureReason = FailureReason.NONE;
         this.controlledReturnToCover = false;
         this.bestDistanceToTarget = Double.POSITIVE_INFINITY;
+        this.debugArrivals++;
     }
 
     public FailureReason getLastFailureReason() {
@@ -242,6 +279,18 @@ public class CoverPositionController extends MoveControl {
     public String getDebugMoveReason() { return debugMoveReason; }
     public Vec3 getDebugLastSetVelocity() { return debugLastSetVelocity; }
 
+    /** Sim-harness telemetry: ticks the cover-anchor request was active this tick. */
+    public int getDebugAnchorTicks() { return debugAnchorTicks; }
+
+    /** Sim-harness telemetry: ticks the anchor actually nudged velocity toward the slot. */
+    public int getDebugAnchorPulls() { return debugAnchorPulls; }
+
+    /** Sim-harness telemetry: slot distance at the most recent anchored tick; -1 before the first. */
+    public double getDebugLastAnchorDistance() { return debugLastAnchorDistance; }
+
+    /** Sim-harness telemetry: completed move-target arrivals (REACHED_TARGET transitions). */
+    public int getDebugArrivals() { return debugArrivals; }
+
     /** True when passive anchoring can hold the soldier without an explicit move request. */
     public boolean isWithinCoverAnchorDeadzone(Vec3 target) {
         return horizontalDistanceTo(target) <= COVER_ANCHOR_DEADZONE;
@@ -251,19 +300,23 @@ public class CoverPositionController extends MoveControl {
      * Requests short-range position correction while the soldier is hiding in
      * its current cover. The request is consumed by tick() so the correction
      * happens after MoveControl has processed the normal movement command.
+     * A reload suspends the anchor EXCEPT for a pending claim→dock alignment,
+     * which finishes through the reload.
      */
     public void maintainCoverAnchor(Vec3 target) {
-        if (!isPreparingOrReloading()) {
+        if (!isPreparingOrReloading() || isFinishingCoverDockDuringReload()) {
             this.coverAnchorTarget = target;
         }
     }
 
     private void applyCoverAnchorVelocity(Vec3 target) {
         if (target == null) return;
+        debugAnchorTicks++;
 
         double dx = target.x - this.mob.getX();
         double dz = target.z - this.mob.getZ();
         double distance = Math.sqrt(dx * dx + dz * dz);
+        debugLastAnchorDistance = distance;
         if (distance < 0.001) return;
 
         double nx = dx / distance;
@@ -276,6 +329,7 @@ public class CoverPositionController extends MoveControl {
         if (towardSpeed < 0.0) {
             velocity = velocity.subtract(new Vec3(nx, 0.0, nz).scale(towardSpeed));
             towardSpeed = 0.0;
+            debugAnchorPulls++;
         }
 
         double desiredSpeed = distance <= COVER_ANCHOR_DEADZONE
@@ -284,8 +338,10 @@ public class CoverPositionController extends MoveControl {
                 (distance - COVER_ANCHOR_DEADZONE) * COVER_ANCHOR_RESPONSE);
         if (towardSpeed < desiredSpeed) {
             velocity = velocity.add(new Vec3(nx, 0.0, nz).scale(desiredSpeed - towardSpeed));
+            debugAnchorPulls++;
         } else if (distance <= COVER_ANCHOR_DEADZONE && towardSpeed > 0.0) {
             velocity = velocity.subtract(new Vec3(nx, 0.0, nz).scale(towardSpeed));
+            debugAnchorPulls++;
         }
 
         this.mob.setDeltaMovement(velocity.x, velocity.y, velocity.z);
@@ -297,7 +353,7 @@ public class CoverPositionController extends MoveControl {
         this.coverAnchorTarget = null;
 
         if (isPreparingOrReloading() && !controlledReturnToCover
-            && !isCoverApproachDuringReload()) {
+            && !isCoverApproachDuringReload() && !isFinishingCoverDockDuringReload()) {
             clear();
             this.debugMoveSource = "reload";
             this.debugMoveReason = "movement held while reloading";
@@ -305,7 +361,8 @@ public class CoverPositionController extends MoveControl {
             return;
         }
 
-        if (this.mob instanceof SoldierEntity soldier && soldier.isCqbEngagementHold()
+        if (this.mob instanceof SoldierEntity soldier && soldier.cqbHoldFreezeEffective()
+            && !shouldDeferCqbHold()
             && !soldier.getPeekController().isMovingToPeek()
             && !soldier.getPeekController().isReturning()) {
             this.operation = Operation.WAIT;
@@ -317,6 +374,18 @@ public class CoverPositionController extends MoveControl {
             this.debugLastSetVelocity = Vec3.ZERO;
             this.debugMoveSource = "cqb-engage";
             this.debugMoveReason = "visible close target";
+            return;
+        }
+
+        // Doorway queueing runs BEFORE the movement-mode split: it must hold
+        // every movement owner alike - cover approaches (controller moves),
+        // GO_TO relocations, hold marches, and attack approaches. Caution
+        // gating (manual CQB or enemy near path) lives in the check.
+        if (this.mob instanceof SoldierEntity queueSoldier
+            && !StevesArmyMod.teleportOnlyMode
+            && tickDoorwayQueueHold(queueSoldier, anchorTarget)) {
+            this.debugMoveSource = "cqb-caution";
+            this.debugMoveReason = "doorway queue";
             return;
         }
 
@@ -413,6 +482,26 @@ public class CoverPositionController extends MoveControl {
             && soldier.isMovingToUnoccupiedCoverDuringReload();
     }
 
+    /**
+     * True when a reload is holding a soldier off its already-claimed cover
+     * slot: the cover is claimed but the claim→dock alignment (recenter +
+     * anchor) has not finished. This transit finishes through the reload under
+     * the same exception as the approach itself — otherwise a reload that
+     * starts mid-alignment leaves the soldier crouched partially outside its
+     * cover cell until the magazine is full.
+     */
+    public boolean isFinishingCoverDockDuringReload() {
+        if (!(this.mob instanceof SoldierEntity soldier) || !soldier.isPreparingOrReloading()) {
+            return false;
+        }
+        var current = soldier.getCoverBehaviorManager().getCurrentCover();
+        if (current == null) {
+            return false;
+        }
+        return !isWithinCoverAnchorDeadzone(
+            CoverTacticalGoal.getCoverStandingPositionStatic(current.getPosition()));
+    }
+
     private void traceMoveControlRotation(String source, float previousYaw, float previousBodyYaw,
                                           float previousHeadYaw) {
         if (this.mob instanceof SoldierEntity soldier
@@ -420,6 +509,41 @@ public class CoverPositionController extends MoveControl {
             soldier.traceRotationWrite("move-control:" + source, previousYaw, previousBodyYaw, previousHeadYaw,
                 "target=" + targetPos + ", speed=" + String.format("%.3f", this.speedModifier));
         }
+    }
+
+    /**
+     * Doorway queueing (phase-4 CQB doctrine): hold before a wall-narrow
+     * passage while a squadmate is still in it. Creep to a stop (never a hard
+     * freeze) facing the passage, gun up. Only under CQB caution (manual CQB
+     * toggle or an enemy near the remaining path). Returns true when it drove
+     * the tick.
+     */
+    private boolean tickDoorwayQueueHold(SoldierEntity soldier, Vec3 anchorTarget) {
+        if (!steeringAdvisor.isCautionActive(soldier)) {
+            return false;
+        }
+        if (soldier.getNavigation().isDone()
+            || !steeringAdvisor.isDoorwayBlocked(soldier)) {
+            return false;
+        }
+        net.minecraft.world.level.pathfinder.Path holdPath = soldier.getNavigation().getPath();
+        if (holdPath != null && !holdPath.isDone()) {
+            Vec3 node = holdPath.getNextEntityPos(soldier);
+            float faceYaw = (float) (Mth.atan2(node.z - this.mob.getZ(),
+                node.x - this.mob.getX()) * (180.0F / (float) Math.PI)) - 90.0F;
+            this.mob.setYRot(this.rotlerp(this.mob.getYRot(), faceYaw, 45.0F));
+        }
+        this.mob.setSpeed((float) (0.03 * this.mob.getAttributeValue(Attributes.MOVEMENT_SPEED)));
+        this.mob.setZza(1.0F);
+        this.mob.setXxa(0.0F);
+        applyCoverAnchorVelocity(anchorTarget);
+        this.debugLastSetVelocity = this.mob.getDeltaMovement();
+        if (com.stevesarmy.debug.DiagnosticLogManager.isCoverScoreLoggingEnabled()
+            && soldier.tickCount % 40 == 0) {
+            com.stevesarmy.StevesArmyMod.LOGGER.info("[DoorwayQueue] S{} holding at ({}, {}) t{}",
+                soldier.getId(), (int) this.mob.getX(), (int) this.mob.getZ(), soldier.tickCount);
+        }
+        return true;
     }
 
     /**

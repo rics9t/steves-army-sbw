@@ -22,11 +22,12 @@ import java.util.UUID;
  * ({@code ArmorThreatScanner}), and crew mounting
  * ({@code VS2Compat.seatSoldierOnEntity} + {@code CrewAssignment}).
  *
- * <p>Gunnery needs no API here: SBW already mirrors a Mob passenger's attack
- * target into its turret/weapon-station AI and fires natively, so a mounted
- * soldier only has to keep a live {@code setTarget} (see
- * {@code combat.SbwVehicleGunnery}). Driving is deliberately unsupported —
- * SBW vehicles move only on client input packets, which a mob cannot send.</p>
+ * <p>Gunnery needs no API here: SBW already mirrors a dedicated vehicle
+ * crew member's attack target into its turret/weapon-station AI and fires
+ * natively (see {@code combat.SbwVehicleGunnery}). Server-side driving is
+ * handled separately by {@code vehicle.VehicleDriver}, which sends native
+ * SBW inputs; ordinary infantry in the driver seat steer only when given a
+ * move ping, while dedicated crew can follow their owner.</p>
  */
 public final class SbwCompat {
     private static final String VEHICLE_ENTITY_CLASS =
