@@ -8,11 +8,15 @@ import com.stevesarmy.transport.TransportOrder;
 import com.stevesarmy.util.RateLimiter;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.projectile.ProjectileUtil;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.AbstractGlassBlock;
 import net.minecraft.world.level.block.StainedGlassPaneBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.EntityHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import org.lwjgl.glfw.GLFW;
@@ -238,6 +242,30 @@ public class PingWheelHandler {
             return hitResult.getLocation();
         }
         return eyePos.add(lookVec.scale(maxDistance));
+    }
+
+    /** The entity under the crosshair, limited by solid blocks along the same ping ray. */
+    static Entity findCrosshairEntity(Minecraft mc) {
+        LocalPlayer player = mc.player;
+        if (player == null) return null;
+
+        double maxDistance = mc.options.renderDistance().get() * 16.0;
+        Vec3 eyePos = player.getEyePosition(1.0f);
+        Vec3 lookVec = player.getViewVector(1.0f);
+        Vec3 endPos = eyePos.add(lookVec.scale(maxDistance));
+        BlockHitResult blockHit = clipPingTarget(player, eyePos, endPos, lookVec);
+        Vec3 entityRayEnd = blockHit.getType() == HitResult.Type.MISS
+            ? endPos : blockHit.getLocation();
+        double entityRayDistanceSqr = eyePos.distanceToSqr(entityRayEnd);
+        if (entityRayDistanceSqr < 1.0e-6) return null;
+
+        AABB searchBox = player.getBoundingBox()
+            .expandTowards(entityRayEnd.subtract(eyePos))
+            .inflate(1.0);
+        EntityHitResult entityHit = ProjectileUtil.getEntityHitResult(
+            player, eyePos, entityRayEnd, searchBox,
+            entity -> !entity.isSpectator() && entity.isPickable(), entityRayDistanceSqr);
+        return entityHit != null ? entityHit.getEntity() : null;
     }
 
     /**

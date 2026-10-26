@@ -195,7 +195,7 @@ public class TransportOrderMessage {
         java.util.Set<java.util.UUID> commandedVehicles = new java.util.HashSet<>();
         for (SoldierEntity soldier : crew) {
             Entity vehicle = soldier.getVehicle();
-            if (!SbwCompat.isVehicle(vehicle) || !SbwVehicles.isOperational(vehicle)
+            if (!SbwCompat.isVehicle(vehicle) || !com.stevesarmy.compat.SbwCompat.isOperational(vehicle)
                 || !SbwVehicles.isDriver(vehicle, soldier)
                 || !commandedVehicles.add(vehicle.getUUID())) {
                 continue;

@@ -2,7 +2,7 @@ package com.stevesarmy.transport;
 
 import java.util.Locale;
 
-/** Actions on the transport and vehicle-control pages of the ping wheel. */
+/** Actions on the vehicle page of the ping wheel. */
 public enum TransportOrder {
     MOUNT,
     DISMOUNT,

@@ -6,15 +6,14 @@ import net.minecraft.network.chat.Component;
 import org.lwjgl.glfw.GLFW;
 
 /**
- * Multi-page state for the command wheel. The middle-mouse ping session cycles through
- * ping orders, vehicle transport, and vehicle control pages. Hold mode uses the configured
- * cycle button; click mode uses right-click. Releasing the wheel confirms the current page.
+ * Two-page state for the command wheel. The middle-mouse ping session cycles between
+ * ping orders and vehicle actions. Hold mode uses the configured cycle button; click mode
+ * uses right-click. Releasing the wheel confirms the current page.
  */
 public final class WheelCycleController {
     public enum Page {
         PING_ORDERS,
-        VEHICLE,
-        VEHICLE_CONTROL
+        VEHICLE
     }
 
     public enum CycleButton {
@@ -77,19 +76,11 @@ public final class WheelCycleController {
     }
 
     private static void cyclePage() {
-        page = switch (page) {
-            case PING_ORDERS -> Page.VEHICLE;
-            case VEHICLE -> Page.VEHICLE_CONTROL;
-            case VEHICLE_CONTROL -> Page.PING_ORDERS;
-        };
+        page = page == Page.PING_ORDERS ? Page.VEHICLE : Page.PING_ORDERS;
     }
 
     public static boolean isVehiclePage() {
-        return page == Page.VEHICLE || page == Page.VEHICLE_CONTROL;
-    }
-
-    public static boolean isVehicleControlPage() {
-        return page == Page.VEHICLE_CONTROL;
+        return page == Page.VEHICLE;
     }
 
     public static Page getPage() {

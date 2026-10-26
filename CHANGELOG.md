@@ -8,7 +8,7 @@ All notable changes to Steve's Army will be documented in this file.
 - Swapping bodies carries health with it: take the soldier's current health and leave your own behind. Swapping back no longer provides a free heal.
 
 ### Superb Warfare Support
-- SBW firearms use a dedicated gun handler. Dedicated vehicle crew can drive compatible SBW vehicles from the vehicle control page, while ordinary infantry ride in passenger seats.
+- SBW firearms use a dedicated gun handler. Dedicated vehicle crew can drive compatible SBW vehicles from the Vehicle page, while ordinary infantry ride in passenger seats.
 - Drivers maintain space from friendly vehicles, stop close to GO_TO pings, and brake for friendly soldiers and vehicles. Anti-tank soldiers can target hostile-crewed vehicles.
 
 ### Machine Gunner Overhaul

@@ -9,11 +9,11 @@ import net.minecraft.network.chat.Component;
 
 import java.util.List;
 
-/** Radial wheels for vehicle transport and vehicle-control orders. */
+/** Radial wheel for vehicle transport and driving orders. */
 public class VehicleWheelRenderer {
     private static final int INNER_RADIUS = 30;
     private static final int OUTER_RADIUS = 80;
-    private static final int LABEL_RADIUS = 70;
+    private static final int LABEL_RADIUS = 74;
     private static final int SEPARATOR_COLOR = 0xCCAAAAAA;
     private static final int SEPARATOR_HALF_WIDTH = 0;
 
@@ -49,17 +49,31 @@ public class VehicleWheelRenderer {
             double labelRad = Math.toRadians(startAngle + sectorSize / 2 - 90);
             int labelX = centerX + (int) (Math.cos(labelRad) * LABEL_RADIUS);
             int labelY = centerY + (int) (Math.sin(labelRad) * LABEL_RADIUS);
-
             int textColor = isHovered ? 0xFFFFFFFF : 0xFFAAAAAA;
-            guiGraphics.drawCenteredString(mc.font, label, labelX, labelY - mc.font.lineHeight / 2, textColor);
+            String[] labelLines = label.split("\\s+");
+            int widestLine = 0;
+            for (String line : labelLines) widestLine = Math.max(widestLine, mc.font.width(line));
+            int sectorLabelWidth = Math.max(1,
+                (int) (2 * LABEL_RADIUS * Math.sin(Math.PI / count) * 0.9));
+            float textScale = widestLine == 0 ? 1.0F
+                : Math.min(1.0F, (float) sectorLabelWidth / widestLine);
+
+            guiGraphics.pose().pushPose();
+            guiGraphics.pose().translate(labelX, labelY, 0);
+            guiGraphics.pose().scale(textScale, textScale, 1.0F);
+            int firstLineY = -(labelLines.length * mc.font.lineHeight) / 2;
+            for (int line = 0; line < labelLines.length; line++) {
+                guiGraphics.drawCenteredString(mc.font, labelLines[line], 0,
+                    firstLineY + line * mc.font.lineHeight, textColor);
+            }
+            guiGraphics.pose().popPose();
         }
 
         // Vehicle orders respect the fire-team scope, so show the same badge as the ping wheel.
         WheelHud.drawScopeBadge(guiGraphics, centerX, centerY);
 
-        String titleKey = WheelCycleController.isVehicleControlPage()
-            ? "wheel.steves_army.vehicle_control" : "wheel.steves_army.vehicle";
-        WheelCycleController.drawPageHeader(guiGraphics, Component.translatable(titleKey));
+        WheelCycleController.drawPageHeader(guiGraphics,
+            Component.translatable("wheel.steves_army.vehicle"));
 
         RenderSystem.enableDepthTest();
         RenderSystem.disableBlend();

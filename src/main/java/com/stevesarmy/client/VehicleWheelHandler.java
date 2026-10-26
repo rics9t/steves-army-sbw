@@ -7,24 +7,21 @@ import com.stevesarmy.transport.TransportOrder;
 import net.minecraft.client.Minecraft;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.phys.Vec3;
-import org.lwjgl.glfw.GLFW;
 
 import java.util.List;
 
 /**
- * Hover/selection logic for vehicle wheel pages. They are reached by cycling pages while the
- * ping wheel is open (see
- * WheelCycleController), and the ping wheel's release path calls {@link #fireSelected(Minecraft)}.
+ * Hover/selection logic for the vehicle page. It is reached by cycling pages while the
+ * ping wheel is open (see WheelCycleController), and the ping wheel's release path sends
+ * the selected vehicle action.
  */
 public class VehicleWheelHandler {
     private static TransportOrder currentHoveredAction;
-    private static final List<TransportOrder> TRANSPORT_ACTIONS = List.of(
+    private static final List<TransportOrder> VEHICLE_ACTIONS = List.of(
         TransportOrder.MOUNT,
         TransportOrder.DISMOUNT,
         TransportOrder.MOUNT_CREW,
-        TransportOrder.DISMOUNT_CREW
-    );
-    private static final List<TransportOrder> CONTROL_ACTIONS = List.of(
+        TransportOrder.DISMOUNT_CREW,
         TransportOrder.DRIVE_GO_TO,
         TransportOrder.DRIVE_ATTACK,
         TransportOrder.DRIVE_FOLLOW,
@@ -32,7 +29,7 @@ public class VehicleWheelHandler {
     );
 
     public static List<TransportOrder> actionsForCurrentPage() {
-        return WheelCycleController.isVehicleControlPage() ? CONTROL_ACTIONS : TRANSPORT_ACTIONS;
+        return VEHICLE_ACTIONS;
     }
 
     static TransportOrder getHoveredAction() {
