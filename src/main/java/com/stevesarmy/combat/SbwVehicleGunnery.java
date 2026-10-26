@@ -22,8 +22,9 @@ import java.util.UUID;
  * into the vehicle's {@code aiTurretTargetUUID} and auto-fired at the weapon's
  * RPM with ballistic lead). This ticker therefore keeps exactly one thing alive
  * while the crew member's own AI is frozen: target acquisition. No movement,
- * no cover, no firing of our own — the crew member is a pure spotter; SBW shoots.
- * Ordinary infantry stay passive as vehicle passengers.
+ * no cover, no handheld firing — the crew member is a pure spotter; SBW shoots.
+ * Ordinary infantry use {@link MountedSoldierGunnery} only in seats that permit
+ * handheld weapons.
  *
  * <p>Called from the frozen-AI branch in {@code SoldierEntity.customServerAiStep},
  * the same structural pattern as {@link StationGunnerAI} (station AI runs outside
@@ -51,6 +52,16 @@ public final class SbwVehicleGunnery {
         }
         long gameTime = serverLevel.getGameTime();
         UUID soldierId = soldier.getUUID();
+
+        // SBW keeps auto-firing a passenger's last target until its Mob target
+        // changes. Clear dead, friendly, or hidden targets immediately instead
+        // of leaving the turret trained on their last position between scans.
+        LivingEntity current = soldier.getTarget();
+        if (current != null && !isValidSpottingTarget(soldier, current)) {
+            soldier.setTarget(null);
+            current = null;
+        }
+
         Long last = lastRetargetBySoldier.get(soldierId);
         if (last != null && gameTime - last < RETARGET_INTERVAL_TICKS) {
             return;
@@ -59,7 +70,6 @@ public final class SbwVehicleGunnery {
         pruneIfNeeded(gameTime);
 
         // Keep a still-valid target rather than flip-flopping between equals.
-        LivingEntity current = soldier.getTarget();
         if (current != null && current.isAlive() && isValidSpottingTarget(soldier, current)) {
             return;
         }

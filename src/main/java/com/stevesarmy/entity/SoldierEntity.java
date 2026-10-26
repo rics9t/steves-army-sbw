@@ -11,6 +11,7 @@ import com.stevesarmy.combat.CoverStateDebugManager;
 import com.stevesarmy.combat.DetectionSystem;
 import com.stevesarmy.combat.GrenadeIntegration;
 import com.stevesarmy.combat.GunIntegration;
+import com.stevesarmy.combat.MountedSoldierGunnery;
 import com.stevesarmy.combat.SbwVehicleGunnery;
 import com.stevesarmy.combat.ThreatAwareness;
 import com.stevesarmy.combat.cover.CoverBehaviorManager;
@@ -1542,6 +1543,20 @@ public class SoldierEntity extends PathfinderMob implements Container {
             tracePeekSnapshot();
         }
 
+        // Swimming is also our prone pose. Keep the synchronized posture clear
+        // while riding an SBW vehicle so old combat/cover plans cannot make a
+        // seated soldier lie across the vehicle model.
+        if (isMountedInSbwVehicle()) {
+            firingProne = false;
+            if (entityData.get(LOW_CROUCHING)) {
+                entityData.set(LOW_CROUCHING, false);
+            }
+            if (getPose() == Pose.SWIMMING) {
+                setPose(Pose.STANDING);
+                refreshDimensions();
+            }
+        }
+
         // Enforce the server-synced posture every tick to fight vanilla pose overrides.
         // Suppression recovery is owned by CoverTacticalGoal, not this entity tick.
         if (entityData.get(LOW_CROUCHING)) {
@@ -1630,6 +1645,21 @@ public class SoldierEntity extends PathfinderMob implements Container {
     }
 
     @Override
+    public void setPose(Pose pose) {
+        if (pose == Pose.SWIMMING && isMountedInSbwVehicle()) {
+            super.setPose(Pose.STANDING);
+            refreshDimensions();
+            return;
+        }
+        super.setPose(pose);
+    }
+
+    private boolean isMountedInSbwVehicle() {
+        return isPassenger()
+            && com.stevesarmy.compat.sbw.SbwCompat.isVehicle(getVehicle());
+    }
+
+    @Override
     public void knockback(double strength, double x, double z) {
         Vec3 before = getDeltaMovement();
         super.knockback(strength, x, z);
@@ -1680,15 +1710,12 @@ public class SoldierEntity extends PathfinderMob implements Container {
             && com.stevesarmy.compat.sbw.SbwCompat.isVehicle(sbwVehicle)
             && !com.stevesarmy.compat.sbw.SbwVehicles.isDrone(sbwVehicle)) {
             // SBW passengers are real taxi riders: keep them seated and freeze
-            // infantry AI. Dedicated crew gunnery can still observe and fire
-            // from the vehicle while its driver registry handles vehicle orders.
+            // movement AI. Dedicated crew spots for the vehicle weapons; other
+            // passengers can fire their handheld gun from seats that allow it.
             if (getRole() == SoldierRole.VEHICLE_CREW) {
                 SbwVehicleGunnery.tickMounted(this);
             } else {
-                setTarget(null);
-            }
-            if (shouldTickGrenadeController(gameTime)) {
-                grenadeTacticalController.tick(getTarget(), getGrenadeSquadIntel());
+                MountedSoldierGunnery.tickMounted(this);
             }
             return;
         }
@@ -2569,6 +2596,13 @@ public BlockPos getPingMoveTarget() {
         // VS2-mounted passenger, breaking seat rendering and ship collision.
         if (lowCrouch && VS2Compat.isOnShip(this)) {
             lowCrouch = false;
+        }
+
+        // A seated SBW passenger cannot enter the swimming/prone pose. Keep
+        // the combat ownership bit in sync so it does not reassert the pose.
+        if (lowCrouch && isMountedInSbwVehicle()) {
+            lowCrouch = false;
+            firingProne = false;
         }
 
         if (!lowCrouch) {

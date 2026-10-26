@@ -3,6 +3,8 @@ package com.stevesarmy.vehicle;
 import com.stevesarmy.compat.sbw.SbwVehicles;
 import com.stevesarmy.entity.SoldierEntity;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.Map;
@@ -21,16 +23,32 @@ public final class VehicleWeaponController {
     public static void tick(VehicleDriver driver, Entity vehicle) {
         if (vehicle == null || vehicle.level().isClientSide) return;
 
-        Vec3 targetPos = driver.resolveAttackPosition(vehicle);
+        Vec3 orderedTargetPos = driver.resolveAttackPosition(vehicle);
         UUID targetId = driver.attackTargetId();
 
-        boolean engaging = targetPos != null
+        boolean engaging = orderedTargetPos != null
             && (driver.mode() == VehicleDriveMode.ATTACK || driver.mode() == VehicleDriveMode.HOLD);
 
         if (!engaging) {
             SbwVehicles.fire(vehicle, false);
             return;
         }
+
+        // A location order may outlive the target that originally attracted
+        // the crew. Fire only while the spotter has a live hostile target, so
+        // the cannon or MG never keeps shooting at the old aim point.
+        SoldierEntity spotter = driver.driverSoldier();
+        Entity tracked = targetId != null && vehicle.level() instanceof ServerLevel level
+            ? level.getEntity(targetId)
+            : spotter != null ? spotter.getTarget() : null;
+        if (!(tracked instanceof LivingEntity target) || !target.isAlive()
+            || spotter == null || spotter.isFriendlyTo(target)
+            || !spotter.isProactiveTarget(target)) {
+            SbwVehicles.fire(vehicle, false);
+            return;
+        }
+        targetId = target.getUUID();
+        Vec3 targetPos = target.getBoundingBox().getCenter();
 
         long now = vehicle.level().getGameTime();
         int seats = SbwVehicles.maxPassengers(vehicle);

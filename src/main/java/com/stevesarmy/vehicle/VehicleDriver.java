@@ -15,6 +15,7 @@ import net.minecraft.world.phys.Vec3;
 import java.lang.ref.WeakReference;
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.Objects;
 import java.util.UUID;
 
 /**
@@ -28,12 +29,13 @@ public final class VehicleDriver {
     private static final double FOLLOW_DISTANCE = 14.0;
     private static final double BRAKE_DISTANCE = 8.0;
     private static final double MOVE_SLOW_APPROACH_DISTANCE = 10.0;
-    private static final double MOVE_STOP_RADIUS = 2.0;
-    private static final double WAYPOINT_TOLERANCE = 3.5;
+    private static final double MOVE_STOP_RADIUS = 3.0;
+    private static final double FOLLOW_STOPPING_TICKS = 8.0;
+    private static final double WAYPOINT_TOLERANCE = 1.0;
     private static final float STEER_DEADZONE_DEGREES = 5.0f;
-    private static final float HARD_TURN_DEGREES = 45.0f;
+    private static final float HARD_TURN_DEGREES = 35.0f;
 
-    private static final int REPATH_INTERVAL_TICKS = 40;
+    private static final int REPATH_INTERVAL_TICKS = 20;
     private static final int STUCK_CHECK_TICKS = 30;
     private static final double STUCK_MIN_PROGRESS = 1.0;
 
@@ -49,6 +51,8 @@ public final class VehicleDriver {
 
     private Deque<Vec3> waypoints = new ArrayDeque<>();
     private int repathCooldown = 0;
+    private boolean followBraking;
+    private boolean destinationBraking;
 
     private Vec3 lastStuckSample = Vec3.ZERO;
     private int stuckTimer = 0;
@@ -79,17 +83,22 @@ public final class VehicleDriver {
         this.mode = VehicleDriveMode.FOLLOW;
         this.followTarget = new WeakReference<>(target);
         this.destination = null;
+        clearAttack();
         clearPath();
     }
 
     public void orderGoTo(BlockPos pos) {
         this.mode = VehicleDriveMode.GO_TO;
         this.destination = pos;
+        followTarget = new WeakReference<>(null);
+        clearAttack();
         clearPath();
     }
 
     public void orderAttack(UUID targetId, Vec3 pos) {
         this.mode = VehicleDriveMode.ATTACK;
+        this.destination = null;
+        this.followTarget = new WeakReference<>(null);
         this.attackTargetId = targetId;
         this.attackTargetPos = pos;
         clearPath();
@@ -97,6 +106,9 @@ public final class VehicleDriver {
 
     public void orderHold() {
         this.mode = VehicleDriveMode.HOLD;
+        this.destination = null;
+        this.followTarget = new WeakReference<>(null);
+        clearAttack();
         clearPath();
         Entity vehicle = vehicle();
         if (vehicle != null) brake(vehicle);
@@ -104,6 +116,7 @@ public final class VehicleDriver {
 
     public void orderDismount() {
         this.mode = VehicleDriveMode.DISMOUNT;
+        clearAttack();
         clearPath();
         releaseControls();
     }
@@ -116,6 +129,8 @@ public final class VehicleDriver {
     private void clearPath() {
         waypoints.clear();
         repathCooldown = 0;
+        followBraking = false;
+        destinationBraking = false;
     }
 
     public boolean tick() {
@@ -161,8 +176,13 @@ public final class VehicleDriver {
             } else if (dedicatedCrew && soldier.hasValidAttackTarget()) {
                 BlockPos attackPos = soldier.getAttackTargetPos();
                 Vec3 targetVec = Vec3.atCenterOf(attackPos);
-                if (mode != VehicleDriveMode.ATTACK || attackTargetPos == null || attackTargetPos.distanceToSqr(targetVec) > 4.0) {
-                    orderAttack(null, targetVec);
+                LivingEntity spottedTarget = soldier.getTarget();
+                UUID spottedTargetId = spottedTarget != null && spottedTarget.isAlive()
+                    && !soldier.isFriendlyTo(spottedTarget) ? spottedTarget.getUUID() : null;
+                if (mode != VehicleDriveMode.ATTACK || attackTargetPos == null
+                    || attackTargetPos.distanceToSqr(targetVec) > 4.0
+                    || !Objects.equals(attackTargetId, spottedTargetId)) {
+                    orderAttack(spottedTargetId, targetVec);
                 }
             } else if (dedicatedCrew && soldier.getSquadMode() == com.stevesarmy.squad.SquadMode.FOLLOW) {
                 Entity owner = soldier.getOwner();
@@ -216,9 +236,16 @@ public final class VehicleDriver {
         double stopDistance = Math.max(BRAKE_DISTANCE,
             VehicleConvoy.safeFollowDistance(vehicle, target));
         double speed = vehicle.getDeltaMovement().horizontalDistance();
-        if (distance <= stopDistance + speed * 4.0) {
+
+        if (!followBraking
+            && distance <= stopDistance + Math.max(2.0, speed * FOLLOW_STOPPING_TICKS)) {
+            followBraking = true;
+        }
+        if (followBraking) {
             brake(vehicle);
-            return;
+            if (speed > 0.1) return;
+            followBraking = false;
+            if (distance <= stopDistance + 2.0) return;
         }
 
         Vec3 awayFromLead = horizontal(vehicle.position().subtract(target.position()));
@@ -239,27 +266,37 @@ public final class VehicleDriver {
         Vec3 goal = Vec3.atCenterOf(destination);
         double distance = horizontalDistance(vehicle.position(), goal);
         double speed = vehicle.getDeltaMovement().horizontalDistance();
-        if (distance <= MOVE_STOP_RADIUS && speed <= 0.15) {
+        if (!destinationBraking && speed > 0.1
+            && distance <= MOVE_STOP_RADIUS + 1.0 + speed * FOLLOW_STOPPING_TICKS) {
+            destinationBraking = true;
+        }
+        if (destinationBraking) {
             brake(vehicle);
-            mode = VehicleDriveMode.HOLD;
-            SoldierEntity s = driverSoldier();
-            if (s != null) {
-                s.completeGoToIfGeneration(s.getPingMoveGeneration());
-            }
+            if (speed > 0.1) return;
+            destinationBraking = false;
+        }
+        if (distance <= MOVE_STOP_RADIUS && speed <= 0.1) {
+            arriveAtDestination(vehicle);
             return;
         }
-        if (speed > 0.15 && distance <= MOVE_STOP_RADIUS + speed * 4.0) {
-            brake(vehicle);
-            return;
-        }
-        driveTo(vehicle, destination, goal, distance > MOVE_SLOW_APPROACH_DISTANCE);
+        driveTo(vehicle, destination, goal, distance > MOVE_SLOW_APPROACH_DISTANCE * 2.0);
+    }
+
+    private void arriveAtDestination(Entity vehicle) {
+        brake(vehicle);
+        mode = VehicleDriveMode.HOLD;
+        clearPath();
+        SoldierEntity s = driverSoldier();
+        if (s != null) s.completeGoToIfGeneration(s.getPingMoveGeneration());
     }
 
     private void tickAttack(Entity vehicle) {
         Vec3 targetPos = resolveAttackPosition(vehicle);
         if (targetPos == null) {
             mode = VehicleDriveMode.HOLD;
-            releaseControls();
+            clearAttack();
+            clearPath();
+            brake(vehicle);
             return;
         }
         double distance = vehicle.position().distanceTo(targetPos);
@@ -279,6 +316,8 @@ public final class VehicleDriver {
                 attackTargetPos = target.position();
                 return attackTargetPos;
             }
+            clearAttack();
+            return null;
         }
         return attackTargetPos;
     }
@@ -299,18 +338,22 @@ public final class VehicleDriver {
 
         if (repathCooldown-- <= 0 || waypoints.isEmpty()) {
             repathCooldown = REPATH_INTERVAL_TICKS;
-            double halfWidth = Math.max(1.0, vehicle.getBbWidth() / 2.0);
+            double halfWidth = VehiclePathfinder.footprintRadius(vehicle);
+            double height = VehiclePathfinder.footprintHeight(vehicle);
             waypoints = VehiclePathfinder.findPath(
-                vehicle.level(), vehicle.blockPosition(), goalPos, halfWidth);
+                vehicle.level(), vehicle.blockPosition(), goalPos, goalVec, halfWidth, height);
             if (waypoints.isEmpty()) {
-                waypoints.add(goalVec);
+                repathCooldown = 10;
+                brake(vehicle);
+                return;
             }
         }
 
         Vec3 waypoint = waypoints.peek();
         while (waypoint != null) {
-            double tolerance = waypoints.size() == 1 ? 0.9 : WAYPOINT_TOLERANCE;
-            if (horizontalDistance(vehicle.position(), waypoint) > tolerance) break;
+            double tolerance = waypoints.size() == 1 ? 1.25 : WAYPOINT_TOLERANCE;
+            if (horizontalDistance(vehicle.position(), waypoint) > tolerance
+                && !hasPassedWaypoint(vehicle, waypoint)) break;
             waypoints.poll();
             waypoint = waypoints.peek();
         }
@@ -319,8 +362,19 @@ public final class VehicleDriver {
             return;
         }
 
+        if (shouldBrakeForCorner(vehicle, waypoint)) {
+            brake(vehicle);
+            return;
+        }
+
         detectAndHandleStuck(vehicle);
         if (reverseTicks > 0) {
+            Vec3 reverse = horizontal(vehicle.getForward()).scale(-1.0);
+            if (shouldBrakeForFriendly(vehicle, reverse)) {
+                reverseTicks = 0;
+                brake(vehicle);
+                return;
+            }
             reverseTicks--;
             SbwVehicles.updateInputs(vehicle, false, true, false, false, false);
             return;
@@ -356,7 +410,7 @@ public final class VehicleDriver {
         }
 
         Vec3 driveDirection = delta.scale(1.0 / distance);
-        if (accelerate && shouldBrakeForFriendly(vehicle, driveDirection)) {
+        if (shouldBrakeForFriendly(vehicle, driveDirection)) {
             brake(vehicle);
             return false;
         }
@@ -369,11 +423,17 @@ public final class VehicleDriver {
         boolean turnRight = error > STEER_DEADZONE_DEGREES;
         boolean sharpTurn = Math.abs(error) > HARD_TURN_DEGREES;
         boolean forward = accelerate && !sharpTurn;
-        boolean sprint = allowSprint && accelerate && !sharpTurn
-            && Math.abs(error) < STEER_DEADZONE_DEGREES;
+        boolean sprint = allowSprint && forward && Math.abs(error) < 10.0f
+            && distance > 6.0;
+
+        Vec3 velocity = vehicle.getDeltaMovement();
+        double forwardSpeed = velocity.dot(vehicle.getForward());
+        boolean counterForward = !forward && forwardSpeed < -0.05;
+        boolean counterBack = !forward && forwardSpeed > 0.05;
 
         // Native SBW acceleration/speed integration
-        SbwVehicles.updateInputs(vehicle, forward, false, turnLeft, turnRight, sprint);
+        SbwVehicles.updateInputs(vehicle, forward || counterForward, counterBack,
+            turnLeft, turnRight, sprint);
 
         float maxTurn = 3.5f;
         float step = Mth.clamp(error * 0.25f, -maxTurn, maxTurn);
@@ -415,6 +475,33 @@ public final class VehicleDriver {
             if (along <= brakingGap) return true;
         }
         return false;
+    }
+
+    private boolean shouldBrakeForCorner(Entity vehicle, Vec3 waypoint) {
+        if (waypoints.size() < 2) return false;
+        var iterator = waypoints.iterator();
+        iterator.next();
+        if (!iterator.hasNext()) return false;
+        Vec3 next = iterator.next();
+
+        Vec3 incoming = horizontal(waypoint.subtract(vehicle.position()));
+        Vec3 outgoing = horizontal(next.subtract(waypoint));
+        if (incoming.lengthSqr() < 0.01 || outgoing.lengthSqr() < 0.01) return false;
+        double cosine = Mth.clamp(incoming.normalize().dot(outgoing.normalize()), -1.0, 1.0);
+        double turnAngle = Math.toDegrees(Math.acos(cosine));
+        if (turnAngle < 35.0) return false;
+
+        double speed = vehicle.getDeltaMovement().horizontalDistance();
+        double brakingDistance = VehiclePathfinder.footprintRadius(vehicle) + 2.0
+            + speed * FOLLOW_STOPPING_TICKS;
+        return speed > 0.1 && horizontalDistance(vehicle.position(), waypoint) <= brakingDistance;
+    }
+
+    private static boolean hasPassedWaypoint(Entity vehicle, Vec3 waypoint) {
+        Vec3 toWaypoint = horizontal(waypoint.subtract(vehicle.position()));
+        Vec3 velocity = horizontal(vehicle.getDeltaMovement());
+        return velocity.lengthSqr() > 0.04 && toWaypoint.lengthSqr() <= 36.0
+            && velocity.dot(toWaypoint) <= 0.0;
     }
 
     private static boolean isFriendlyObstacle(SoldierEntity observer, Entity candidate) {

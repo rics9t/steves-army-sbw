@@ -17,15 +17,18 @@ import java.util.List;
  */
 public class VehicleWheelHandler {
     private static TransportOrder currentHoveredAction;
+    // The first four sectors are the right half of the wheel. Keep GO_TO in
+    // PingType's GO_TO sector, with FOLLOW and ATTACK beside it; all boarding
+    // actions occupy the left half.
     private static final List<TransportOrder> VEHICLE_ACTIONS = List.of(
+        TransportOrder.DRIVE_FOLLOW,
+        TransportOrder.DRIVE_GO_TO,
+        TransportOrder.DRIVE_ATTACK,
+        TransportOrder.DRIVE_HOLD,
         TransportOrder.MOUNT,
         TransportOrder.DISMOUNT,
         TransportOrder.MOUNT_CREW,
-        TransportOrder.DISMOUNT_CREW,
-        TransportOrder.DRIVE_GO_TO,
-        TransportOrder.DRIVE_ATTACK,
-        TransportOrder.DRIVE_FOLLOW,
-        TransportOrder.DRIVE_HOLD
+        TransportOrder.DISMOUNT_CREW
     );
 
     public static List<TransportOrder> actionsForCurrentPage() {

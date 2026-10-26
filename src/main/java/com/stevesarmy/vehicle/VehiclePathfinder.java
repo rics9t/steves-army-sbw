@@ -1,8 +1,10 @@
 package com.stevesarmy.vehicle;
 
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayDeque;
@@ -25,9 +27,9 @@ import java.util.Set;
  */
 public final class VehiclePathfinder {
 
-    /** Grid step in blocks. Coarse keeps the search cheap for long hauls. */
-    private static final int CELL = 4;
-    private static final int MAX_NODES = 1500;
+    /** Two-block cells retain useful turn geometry without an excessive search. */
+    private static final int CELL = 2;
+    private static final int MAX_NODES = 2400;
     /** Vehicles can climb this many blocks between adjacent cells. */
     private static final int MAX_STEP_UP = 1;
     private static final int MAX_DROP = 3;
@@ -45,6 +47,12 @@ public final class VehiclePathfinder {
      * route exists. Waypoints are block centres at drivable ground height.
      */
     public static Deque<Vec3> findPath(Level level, BlockPos start, BlockPos goal, double halfWidth) {
+        return findPath(level, start, goal, center(goal), halfWidth, 2.0);
+    }
+
+    /** Hull-safe path with an exact final point and the vehicle's vertical clearance. */
+    public static Deque<Vec3> findPath(Level level, BlockPos start, BlockPos goal,
+                                       Vec3 exactGoal, double halfWidth, double height) {
         Deque<Vec3> result = new ArrayDeque<>();
 
         BlockPos from = snapToGround(level, start);
@@ -52,8 +60,8 @@ public final class VehiclePathfinder {
         if (from == null || to == null) return result;
 
         // Straight shot first: most orders do not need a search at all.
-        if (isClearLine(level, from, to, halfWidth)) {
-            result.add(center(to));
+        if (isClearLine(level, from, to, halfWidth, height)) {
+            result.add(exactGoal);
             return result;
         }
 
@@ -74,14 +82,16 @@ public final class VehiclePathfinder {
             if (!closed.add(pos)) continue;
             expanded++;
 
-            if (horizontalDistance(pos, to) <= CELL) {
+            if (horizontalDistance(pos, to) <= CELL
+                && isClearLine(level, pos, to, halfWidth, height)) {
                 reached = pos;
                 break;
             }
 
-            for (BlockPos next : neighbours(level, pos, halfWidth)) {
+            for (BlockPos next : neighbours(level, pos, halfWidth, height)) {
                 if (closed.contains(next)) continue;
-                double stepCost = CELL + Math.abs(next.getY() - pos.getY()) * 1.5;
+                double stepCost = horizontalDistance(pos, next)
+                    + Math.abs(next.getY() - pos.getY()) * 1.5;
                 double tentative = current.g() + stepCost;
                 Double known = best.get(next);
                 if (known != null && tentative >= known) continue;
@@ -102,8 +112,19 @@ public final class VehiclePathfinder {
             result.add(center(reversed.get(i)));
         }
         // Always finish on the real goal, not the snapped cell.
-        result.add(center(to));
+        result.add(exactGoal);
         return result;
+    }
+
+    /** Rotation-safe horizontal clearance based on the current vehicle hitbox. */
+    public static double footprintRadius(Entity vehicle) {
+        if (vehicle == null) return 1.5;
+        AABB bounds = vehicle.getBoundingBox();
+        return Math.max(0.75, Math.max(bounds.getXsize(), bounds.getZsize()) * 0.5 + 0.5);
+    }
+
+    public static double footprintHeight(Entity vehicle) {
+        return vehicle == null ? 2.0 : Math.max(1.0, vehicle.getBbHeight() + 0.5);
     }
 
     private static double heuristic(BlockPos a, BlockPos b) {
@@ -120,7 +141,7 @@ public final class VehiclePathfinder {
         return new Vec3(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5);
     }
 
-    private static List<BlockPos> neighbours(Level level, BlockPos pos, double halfWidth) {
+    private static List<BlockPos> neighbours(Level level, BlockPos pos, double halfWidth, double height) {
         List<BlockPos> out = new ArrayList<>(8);
         int[][] offsets = {
             {CELL, 0}, {-CELL, 0}, {0, CELL}, {0, -CELL},
@@ -131,7 +152,7 @@ public final class VehiclePathfinder {
             if (candidate == null) continue;
             int rise = candidate.getY() - pos.getY();
             if (rise > MAX_STEP_UP || rise < -MAX_DROP) continue;
-            if (!isFootprintClear(level, candidate, halfWidth)) continue;
+            if (!isClearLine(level, pos, candidate, halfWidth, height)) continue;
             out.add(candidate);
         }
         return out;
@@ -166,14 +187,19 @@ public final class VehiclePathfinder {
         return state.getCollisionShape(level, pos).isEmpty();
     }
 
-    /** Checks the vehicle's width fits, not just a single column. */
-    private static boolean isFootprintClear(Level level, BlockPos pos, double halfWidth) {
-        int r = Math.max(0, (int) Math.floor(halfWidth));
+    /** Checks a rotation-safe hull footprint and vertical clearance. */
+    private static boolean isFootprintClear(Level level, BlockPos pos,
+                                            double halfWidth, double height) {
+        int r = Math.max(0, (int) Math.ceil(halfWidth + 0.5));
+        double radiusSqr = halfWidth * halfWidth;
+        int verticalBlocks = Math.max(1, (int) Math.ceil(height));
         for (int dx = -r; dx <= r; dx++) {
             for (int dz = -r; dz <= r; dz++) {
-                BlockPos p = pos.offset(dx, 0, dz);
-                if (!isPassable(level, p) || !isPassable(level, p.above())) {
-                    return false;
+                double nearestX = Math.max(0.0, Math.abs(dx) - 0.5);
+                double nearestZ = Math.max(0.0, Math.abs(dz) - 0.5);
+                if (nearestX * nearestX + nearestZ * nearestZ > radiusSqr) continue;
+                for (int dy = 0; dy < verticalBlocks; dy++) {
+                    if (!isPassable(level, pos.offset(dx, dy, dz))) return false;
                 }
             }
         }
@@ -181,7 +207,8 @@ public final class VehiclePathfinder {
     }
 
     /** Samples along a straight line to see whether a search is needed at all. */
-    private static boolean isClearLine(Level level, BlockPos from, BlockPos to, double halfWidth) {
+    private static boolean isClearLine(Level level, BlockPos from, BlockPos to,
+                                       double halfWidth, double height) {
         double distance = horizontalDistance(from, to);
         if (distance < 1.0) return true;
         int steps = (int) Math.ceil(distance / 2.0);
@@ -194,7 +221,7 @@ public final class VehiclePathfinder {
             BlockPos sample = snapToGround(level, new BlockPos(x, from.getY(), z));
             if (sample == null) return false;
             if (Math.abs(sample.getY() - lastY) > MAX_STEP_UP + MAX_DROP) return false;
-            if (!isFootprintClear(level, sample, halfWidth)) return false;
+            if (!isFootprintClear(level, sample, halfWidth, height)) return false;
             lastY = sample.getY();
         }
         return true;
