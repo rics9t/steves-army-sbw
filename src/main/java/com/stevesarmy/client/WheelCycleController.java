@@ -29,7 +29,6 @@ public final class WheelCycleController {
         }
     }
 
-    private static boolean wasCycleButtonDown = false;
     private static Page page = Page.PING_ORDERS;
 
     private WheelCycleController() {}
@@ -44,35 +43,20 @@ public final class WheelCycleController {
     /** Called when the ping wheel session opens; the default page is the ping orders wheel. */
     public static void onSessionActivated() {
         page = Page.PING_ORDERS;
-        int button = WheelInteractionController.isClickMode() ? GLFW.GLFW_MOUSE_BUTTON_RIGHT
-            : StevesArmyClientConfig.VEHICLE_WHEEL_CYCLE_BUTTON.get().glfwButton;
-        wasCycleButtonDown = GLFW.glfwGetMouseButton(Minecraft.getInstance().getWindow().getWindow(), button) == GLFW.GLFW_PRESS;
     }
 
     public static void tick() {
-        Minecraft mc = Minecraft.getInstance();
-        int cycleButton = WheelInteractionController.isClickMode() ? GLFW.GLFW_MOUSE_BUTTON_RIGHT
-            : StevesArmyClientConfig.VEHICLE_WHEEL_CYCLE_BUTTON.get().glfwButton;
-        boolean cycleButtonDown = GLFW.glfwGetMouseButton(mc.getWindow().getWindow(), cycleButton) == GLFW.GLFW_PRESS;
-        boolean pressed = cycleButtonDown && !wasCycleButtonDown;
-        wasCycleButtonDown = cycleButtonDown;
-
         if (!PingWheelHandler.isWheelActive()) {
             page = Page.PING_ORDERS;
-            return;
-        }
-        if (!StevesArmyClientConfig.ENABLE_VEHICLE_WHEEL.get()) {
-            return;
-        }
-        if (pressed && !WheelInteractionController.isClickMode()) {
-            cyclePage();
         }
     }
 
-    public static void onRightClick() {
-        if (PingWheelHandler.isWheelActive() && StevesArmyClientConfig.ENABLE_VEHICLE_WHEEL.get()) {
-            cyclePage();
-        }
+    /** Cycle from the mouse callback, avoiding native button polling on virtual mouse backends. */
+    public static void onMouseButtonPressed(int button) {
+        if (!PingWheelHandler.isWheelActive() || !StevesArmyClientConfig.ENABLE_VEHICLE_WHEEL.get()) return;
+        int cycleButton = WheelInteractionController.isClickMode() ? GLFW.GLFW_MOUSE_BUTTON_RIGHT
+            : StevesArmyClientConfig.VEHICLE_WHEEL_CYCLE_BUTTON.get().glfwButton;
+        if (button == cycleButton) cyclePage();
     }
 
     private static void cyclePage() {
