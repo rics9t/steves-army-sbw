@@ -2,10 +2,17 @@ package com.stevesarmy.squad;
 
 import com.stevesarmy.StevesArmyConfig;
 import com.stevesarmy.StevesArmyMod;
+import com.stevesarmy.debug.trace.SoldierFlightRecorder;
 import com.stevesarmy.combat.VisibilityRay;
-import com.stevesarmy.combat.cover.CoverBehaviorManager;
+import com.stevesarmy.combat.TargetAcquisition;
+import com.stevesarmy.entity.TargetEntity;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.monster.Monster;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.phys.AABB;
 import com.stevesarmy.entity.SoldierEntity;
-import com.stevesarmy.entity.ai.ExposedCombatController;
+import com.stevesarmy.combat.cover.CoverReservationManager;
+import com.stevesarmy.ping.PingType;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
@@ -31,7 +38,7 @@ import java.util.UUID;
 /**
  * Squad-level decision owner for ATTACK clearing orders: the order decides
  * what progress the squad needs next; cover, navigation, aiming and firing
- * systems execute that decision. This class never moves anyone.
+ * systems execute that decision. After clearance it assigns GO_TO catch-up orders.
  *
  * <p>For each ATTACK {@code SquadActivityManager.Activity} it maintains a
  * bounded clearing area — a flood fill of walkable space connected to the
@@ -42,11 +49,11 @@ import java.util.UUID;
  * check targets. Soldiers claim one each; a target is CHECKED only after
  * verified line of sight across the geometry (never proximity through
  * walls, even between two cells of the same area) has held for a short
- * dwell. The order completes as "Area secured" only when the squad has
+ * dwell. The order completes as "Area secured" when a strict majority has
  * physically entered the space (strict area cells), checked its blind
  * spots, resolved known contact — a check made before the enemy's last
- * sighting does not count — and stayed settled throughout the settle
- * window — never on proximity alone. A stalled attack (a full window with
+ * sighting does not count — without an additional settling delay. A stalled
+ * attack (a full window with
  * neither a new check nor net displacement) is reported once and then
  * persists until the player replaces or cancels it; it is a report, not a
  * hold, so the squad keeps trying while it shows.
@@ -84,13 +91,6 @@ public final class ClearingCoordinator {
     private static final int RECENT_CONTACT_TICKS = 40;
     private static final int CLAIM_REFRESH_TICKS = 40;
     private static final int HEAVY_INTERVAL_TICKS = 10;
-    /**
-     * A soldier whose navigation never reports done but who stands still this
-     * many consecutive observe samples (≈40t) counts as settled — vanilla
-     * paths can end a fraction short of the goal and never fire isDone, which
-     * would otherwise block the SECURE settle forever.
-     */
-    private static final int NAV_ZOMBIE_SETTLE_SAMPLES = 4;
     /**
      * A check target needs this much wall-clock attention after first real
      * line of sight before it counts as observed — glancing a corner through
@@ -134,17 +134,17 @@ public final class ClearingCoordinator {
 
         ClearingStage stage = ClearingStage.APPROACH;
         boolean stalled;
-        long settledSinceTick = -1;
         long stallAnnouncedTick = Long.MIN_VALUE;
         /** Stall approach-anchor: centroid distance to the objective at anchor time (-1 unanchored). */
         long stallAnchorTick = -1;
         double stallAnchorDist = 0;
         long completedAtTick = Long.MIN_VALUE;
         boolean completeRequested;
-        /** Zombie-path settle: last position of a soldier whose navigation is stuck "in progress". */
-        final Map<UUID, double[]> navStillPos = new HashMap<>();
-        /** Zombie-path settle: consecutive stationary observe samples per such soldier. */
-        final Map<UUID, Integer> navStillTicks = new HashMap<>();
+        boolean regrouping;
+        int lastSyncedPending = -1;
+        Set<UUID> recipients = new HashSet<>();
+        Set<UUID> arrived = new HashSet<>();
+        Map<UUID, Integer> catchUpGenerations = new HashMap<>();
         /** TEMP DIAGNOSTIC (wave A validation): last stall-eligibility value, for transition logs. */
         boolean diagStallEligible;
     }
@@ -174,6 +174,15 @@ public final class ClearingCoordinator {
                 continue;
             }
 
+            state.recipients.retainAll(activity.recipientIds());
+            state.arrived.retainAll(state.recipients);
+            if (state.regrouping) {
+                if (state.level.getGameTime() % HEAVY_INTERVAL_TICKS == 0) {
+                    tickRegrouping(server, state, activity);
+                }
+                continue;
+            }
+
             reissueMissingObjectives(state, activity);
             List<SoldierEntity> squad = livingRecipients(state, activity);
             if (squad.isEmpty()) {
@@ -184,16 +193,31 @@ public final class ClearingCoordinator {
             refreshObjectiveClocks(squad);
             boolean heavy = gameTime % HEAVY_INTERVAL_TICKS == 0;
             if (heavy) {
+                if (state.areaCells.isEmpty()) {
+                    if (gameTime % 40 == 0) computeArea(state);
+                    if (state.areaCells.isEmpty()) {
+                        state.stage = ClearingStage.APPROACH;
+                        continue;
+                    }
+                }
+                int previousStage = stageOrdinal(activity.ownerId(), activity.fireTeam());
                 observe(state, squad);
                 updateContactPoints(state, squad, gameTime);
                 updateStageAndCompletion(server, state, activity, squad);
-                tickContactPlan(state.level, squad);
+                if (!state.regrouping) tickContactPlan(state.level, squad);
+                if (!state.completeRequested
+                    && previousStage != stageOrdinal(activity.ownerId(), activity.fireTeam())) {
+                    ServerPlayer owner = server.getPlayerList().getPlayer(activity.ownerId());
+                    if (owner != null) {
+                        SquadActivityManager.sync(owner);
+                    }
+                }
             }
             // Claims reassign on the observe cadence, not their own: consuming a
             // claim frees its owner, and a claim-less soldier falls back to a
             // per-tick nearest-unchecked pick that dithers when he stands near
             // the midpoint of two unchecked clusters.
-            if (heavy || gameTime % CLAIM_REFRESH_TICKS == 0) {
+            if (!state.regrouping && (heavy || gameTime % CLAIM_REFRESH_TICKS == 0)) {
                 assignClaims(state, squad, gameTime);
             }
         }
@@ -216,7 +240,7 @@ public final class ClearingCoordinator {
      */
     private static void reissueMissingObjectives(ClearingState state,
                                                  SquadActivityManager.AttackActivityView activity) {
-        if (state.completeRequested) {
+        if (state.completeRequested || state.regrouping) {
             return;
         }
         for (UUID id : activity.recipientIds()) {
@@ -266,11 +290,15 @@ public final class ClearingCoordinator {
         state.claims.clear();
         state.stage = ClearingStage.APPROACH;
         state.stalled = false;
-        state.settledSinceTick = -1;
         state.stallAnnouncedTick = Long.MIN_VALUE;
         state.stallAnchorTick = -1;
         state.stallAnchorDist = 0;
         state.completeRequested = false;
+        state.regrouping = false;
+        state.lastSyncedPending = -1;
+        state.recipients = new HashSet<>(activity.recipientIds());
+        state.arrived.clear();
+        state.catchUpGenerations.clear();
         state.completedAtTick = Long.MIN_VALUE;
         state.level = findLevel(server, state);
         if (state.level == null) {
@@ -317,9 +345,8 @@ public final class ClearingCoordinator {
     private static void computeArea(ClearingState state) {
         BlockPos start = snapToStandable(state.level, state.objective);
         if (start == null) {
-            // Unreachable interior: the objective block itself is the only cell,
-            // so completion degrades to "reached the marker" rather than nothing.
-            state.areaCells = Set.of(state.objective.asLong());
+            // An invalid marker is not a reachable cleared objective.
+            state.areaCells = Set.of();
             state.pois = List.of();
             return;
         }
@@ -380,14 +407,25 @@ public final class ClearingCoordinator {
         return pois;
     }
 
-    @SuppressWarnings("deprecation")
     private static boolean isStandable(ServerLevel level, BlockPos cell) {
-        BlockState floor = level.getBlockState(cell.below());
-        if (!floor.isFaceSturdy(level, cell.below(), Direction.UP)) {
-            return false;
-        }
-        return level.getBlockState(cell).isPathfindable(level, cell, PathComputationType.LAND)
-            && level.getBlockState(cell.above()).isPathfindable(level, cell.above(), PathComputationType.LAND);
+        if (!level.hasChunkAt(cell) || !level.hasChunkAt(cell.below())) return false;
+        var floor = level.getBlockState(cell.below()).getCollisionShape(level, cell.below());
+        if (floor.isEmpty() || !level.getFluidState(cell).isEmpty()) return false;
+        double top = floor.max(Direction.Axis.Y);
+        // Canonical cells are above the supporting block, even on paths/slabs.
+        if (top <= 0 || top > 1) return false;
+        double feet = cell.getY() - 1 + top;
+        return level.noCollision(new AABB(cell.getX() + 0.2, feet + 0.001, cell.getZ() + 0.2,
+            cell.getX() + 0.8, feet + 1.8, cell.getZ() + 0.8));
+    }
+
+    /** Partial-height floors put blockPosition one cell below the navigation cell. */
+    private static boolean insideArea(ClearingState state, BlockPos pos) {
+        if (state.areaCells.contains(pos.asLong())) return true;
+        if (!state.areaCells.contains(pos.above().asLong())) return false;
+        var support = state.level.getBlockState(pos).getCollisionShape(state.level, pos);
+        return !support.isEmpty() && support.max(Direction.Axis.Y) > 0
+            && support.max(Direction.Axis.Y) < 1;
     }
 
     @SuppressWarnings("deprecation")
@@ -398,16 +436,22 @@ public final class ClearingCoordinator {
     }
 
     private static BlockPos snapToStandable(ServerLevel level, BlockPos objective) {
-        if (isStandable(level, objective)) {
-            return objective.immutable();
-        }
-        for (int dy = -2; dy <= 4; dy++) {
-            BlockPos candidate = objective.offset(0, dy, 0);
-            if (isStandable(level, candidate)) {
-                return candidate;
+        BlockPos best = null;
+        double bestDistance = Double.MAX_VALUE;
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                if (dx * dx + dz * dz > 4) continue;
+                for (int dy = -2; dy <= 4; dy++) {
+                    BlockPos candidate = objective.offset(dx, dy, dz);
+                    double distance = dx * dx + dz * dz + dy * dy;
+                    if (distance < bestDistance && isStandable(level, candidate)) {
+                        best = candidate;
+                        bestDistance = distance;
+                    }
+                }
             }
         }
-        return null;
+        return best;
     }
 
     // ----------------------------------------------------------- observation
@@ -423,7 +467,7 @@ public final class ClearingCoordinator {
         // corner through a doorway for one tick is not checking it).
         for (SoldierEntity soldier : squad) {
             BlockPos at = soldier.blockPosition();
-            if (!state.areaCells.contains(at.asLong())) {
+            if (!insideArea(state, at)) {
                 continue;
             }
             for (BlockPos poi : state.pois) {
@@ -698,12 +742,64 @@ public final class ClearingCoordinator {
                 taken.add(best);
             }
         }
+        skipBehindEveryone(state, squad, now);
+    }
+
+    /** Candidates at parity (2 blocks) with the soldier's objective distance are not "behind". */
+    private static final double BEHIND_SLACK_SQ = 4.0;
+
+    /**
+     * Blind spots farther from the objective than every living soldier cannot
+     * be reached by advancing — holding the order open for them asks the squad
+     * to walk backwards, which is exactly the stuck-behind failure this
+     * coordinator must not create. Mark them checked (skipped): the doctrine
+     * accepts an unobserved pocket behind the whole squad once everyone is
+     * past it.
+     */
+    private static void skipBehindEveryone(ClearingState state, List<SoldierEntity> squad, long now) {
+        boolean anyAlive = false;
+        for (SoldierEntity soldier : squad) {
+            if (soldier.isAlive()) {
+                anyAlive = true;
+                break;
+            }
+        }
+        if (!anyAlive) {
+            return;
+        }
+        for (BlockPos poi : state.pois) {
+            long key = poi.asLong();
+            if (state.checkedTick.containsKey(key) || state.claims.containsValue(poi)) {
+                continue;
+            }
+            double poiToObj = poi.distSqr(state.objective);
+            boolean behindEveryone = true;
+            for (SoldierEntity soldier : squad) {
+                if (soldier.isAlive()
+                    && poiToObj + BEHIND_SLACK_SQ < state.objective.distSqr(soldier.blockPosition())) {
+                    behindEveryone = false;
+                    break;
+                }
+            }
+            if (behindEveryone) {
+                state.checkedTick.put(key, now);
+            }
+        }
     }
 
     private static BlockPos nearestUnchecked(ClearingState state, SoldierEntity soldier,
                                              Set<BlockPos> taken) {
         BlockPos best = null;
         double bestDist = Double.MAX_VALUE;
+        // Forward preference: a check target behind the soldier (farther from
+        // the objective than he already is) drags the back of the squad
+        // backwards while the front advances — the stuck-in-house pin. Claim
+        // the nearest FORWARD target when one exists; plain nearest remains
+        // the fallback so a squad with nothing forward still works its list.
+        BlockPos bestForward = null;
+        double bestForwardDist = Double.MAX_VALUE;
+        BlockPos objective = state.objective;
+        double soldierToObj = objective.distSqr(soldier.blockPosition());
         for (BlockPos poi : state.pois) {
             if (state.checkedTick.containsKey(poi.asLong()) || taken.contains(poi)) {
                 continue;
@@ -713,7 +809,14 @@ public final class ClearingCoordinator {
                 bestDist = dist;
                 best = poi;
             }
+            if (poi.distSqr(objective) + BEHIND_SLACK_SQ < soldierToObj
+                && dist < bestForwardDist) {
+                bestForwardDist = dist;
+                bestForward = poi;
+            }
         }
+        // Contacts stay exempt from the forward filter: a last-known behind
+        // the squad is a real threat back there, not a stale corner.
         for (BlockPos contact : state.contactPoints.values()) {
             if (state.checkedTick.containsKey(contact.asLong()) || taken.contains(contact)) {
                 continue;
@@ -724,7 +827,7 @@ public final class ClearingCoordinator {
                 best = contact;
             }
         }
-        return best;
+        return bestForward != null ? bestForward : best;
     }
 
     // -------------------------------------------------- stage and completion
@@ -751,130 +854,36 @@ public final class ClearingCoordinator {
                 recentContact = true;
             }
         }
-        boolean areaHealth = allChecked && contactResolved && !recentContact;
+        boolean areaHealth = allChecked && contactResolved && !recentContact
+            && isActualEnemyAreaClear(state);
 
-        boolean allInside = true;
-        boolean allSettled = true;
+        boolean anyInside = false;
         double cx = 0;
         double cz = 0;
         for (SoldierEntity soldier : squad) {
             BlockPos at = soldier.blockPosition();
-            // Strict: a feet block that is not a walkable area cell is outside,
-            // however close. A 3-block tolerance read the sidewalk through the
-            // wall as "inside" and could complete a clearing without entry.
-            if (!state.areaCells.contains(at.asLong())) {
-                allInside = false;
-            }
-            CoverBehaviorManager.CoverState coverState = soldier.getCoverBehaviorManager().getState();
-            boolean coverWalking = coverState == CoverBehaviorManager.CoverState.SEEKING_COVER
-                || coverState == CoverBehaviorManager.CoverState.REPOSITIONING
-                || ExposedCombatController.hasActiveMove(soldier);
-            boolean navWalking = !soldier.getNavigation().isDone();
-            // A zombie path — navigation "in progress" while the soldier
-            // stands still — used to block the settle window forever: a dock
-            // walk that ends a fraction short of an occupied slot leaves an
-            // unfinished path, allSettled never reads true, and an order with
-            // every check done and everyone parked never completes (the
-            // house-stuck completion form). Standing still for a full stall
-            // of observe cycles IS settled however the path object feels;
-            // only genuine cover-system legs or an actually-moving soldier
-            // keep the squad unsettled.
-            if (navWalking && !coverWalking) {
-                Vec3 pos = soldier.position();
-                double[] still = state.navStillPos.get(soldier.getUUID());
-                int ticks = state.navStillTicks.getOrDefault(soldier.getUUID(), 0);
-                // Half a block between observe samples: a real walk covers
-                // ~2.5 blocks per 10t sample, while a docked soldier whose
-                // cover re-search re-paths him in place jitters well under
-                // this — the tight 0.1 threshold never accumulated samples
-                // against that shuffle and the settle blocked forever.
-                if (still != null
-                    && (pos.x - still[0]) * (pos.x - still[0])
-                        + (pos.z - still[2]) * (pos.z - still[2]) > 0.25D) {
-                    ticks = 0;
-                }
-                state.navStillPos.put(soldier.getUUID(),
-                    new double[] {pos.x, pos.y, pos.z});
-                ticks++;
-                state.navStillTicks.put(soldier.getUUID(), ticks);
-                if (ticks < NAV_ZOMBIE_SETTLE_SAMPLES) {
-                    allSettled = false;
-                }
-            } else {
-                state.navStillPos.remove(soldier.getUUID());
-                state.navStillTicks.remove(soldier.getUUID());
-                // Plain navigation counts as movement too: the cover states
-                // and ExposedCombatController do not own every leg (fallback
-                // advances, the SECURE assemble walk ride raw navigation),
-                // and a soldier mid-walk is not settled however calm his
-                // cover state reads.
-                if (coverWalking || navWalking) {
-                    allSettled = false;
-                }
-            }
+            // Strict walkable-cell membership: proximity through a wall is not entry.
+            boolean inside = insideArea(state, at);
+            anyInside |= inside;
             cx += at.getX();
             cz += at.getZ();
         }
         cx /= squad.size();
         cz /= squad.size();
 
-        // The settle interval must be CONTINUOUSLY quiet: soldiers moving,
-        // seeking, or repositioning at any sample restarts the clock, so a
-        // squad that wandered through the whole window cannot complete by
-        // standing still for the final tick.
-        if (areaHealth && allInside && allSettled) {
-            if (state.settledSinceTick < 0) {
-                state.settledSinceTick = now;
-            }
-        } else {
-            state.settledSinceTick = -1;
-        }
-
-        boolean settled = state.settledSinceTick >= 0
-            && now - state.settledSinceTick >= StevesArmyConfig.getAttackClearSettleTicks();
-
-        if (settled) {
-            state.stage = ClearingStage.SECURED;
+        // Clearance is latched independently from arrival. A straggler must not
+        // keep the winners attacking, nor reopen the clear when new contact appears.
+        if (areaHealth) {
+            state.regrouping = true;
+            state.stage = ClearingStage.SECURE;
             state.stalled = false;
-            if (!state.completeRequested) {
-                state.completeRequested = true;
-                state.completedAtTick = now;
-                completeOrder(server, state, activity);
-            }
+            state.claims.clear();
+            tickRegrouping(server, state, activity);
             return;
         }
 
-        // TEMP Wave-A diagnostics: a squad parked inside a healthy area that
-        // still cannot settle is the completion deadlock family — name the
-        // blocker per soldier, rate-limited to one line per 200t.
-        if (areaHealth && allInside) {
-            Long last = NO_SETTLE_DIAG_LAST.get(state);
-            if (last == null || now - last >= 200) {
-                NO_SETTLE_DIAG_LAST.put(state, now);
-                StringBuilder blockers = new StringBuilder();
-                for (SoldierEntity soldier : squad) {
-                    CoverBehaviorManager.CoverState cs = soldier.getCoverBehaviorManager().getState();
-                    boolean moving = cs == CoverBehaviorManager.CoverState.SEEKING_COVER
-                        || cs == CoverBehaviorManager.CoverState.REPOSITIONING
-                        || ExposedCombatController.hasActiveMove(soldier)
-                        || !soldier.getNavigation().isDone();
-                    if (moving) {
-                        blockers.append(' ').append(soldier.getStringUUID(), 0, 8)
-                            .append('=').append(cs)
-                            .append("/move=").append(ExposedCombatController.hasActiveMove(soldier))
-                            .append("/nav=").append(!soldier.getNavigation().isDone());
-                    }
-                }
-                StevesArmyMod.LOGGER.info("[AttackClear][diag] no-settle squad {} area={} inside={} "
-                    + "settledSince={} blockers:{}", activity.objective(), areaHealth, allInside,
-                    state.settledSinceTick,
-                    blockers.isEmpty() ? "none(static)" : blockers.toString());
-            }
-        }
-
-        // SECURE means the squad is inside a healthy space; on approach the
-        // job is still CLEAR (advance) even when nothing is left to check.
-        state.stage = areaHealth && allInside ? ClearingStage.SECURE : ClearingStage.CLEAR;
+        // Squad display follows entry; individual views still own movement decisions.
+        state.stage = anyInside ? ClearingStage.CLEAR : ClearingStage.APPROACH;
 
         // Stall: quiet for a full stall window (no new observation, no live
         // contact) AND no net approach toward the objective across a second
@@ -895,7 +904,8 @@ public final class ClearingCoordinator {
             lastContactActivity = Math.max(lastContactActivity, seen);
         }
         long quietFor = Math.min(now - state.lastCheckTick, now - lastContactActivity);
-        boolean stallEligible = state.stage == ClearingStage.CLEAR
+        boolean stallEligible = (state.stage == ClearingStage.CLEAR
+            || state.stage == ClearingStage.APPROACH)
             && quietFor >= StevesArmyConfig.getAttackClearStallTicks();
         // TEMP DIAGNOSTIC (wave A validation): stall-clock visibility.
         if (stallEligible != state.diagStallEligible) {
@@ -944,13 +954,186 @@ public final class ClearingCoordinator {
         }
     }
 
+    /** Completion-only truth check; never reveals unseen entities to perception or targeting. */
+    private static boolean isActualEnemyAreaClear(ClearingState state) {
+        double x = state.objective.getX() + 0.5;
+        double y = state.objective.getY();
+        double z = state.objective.getZ() + 0.5;
+        final int radius = 16;
+        // Fail closed for missing chunks intersecting the cylinder, without loading them.
+        for (int cx = net.minecraft.util.Mth.floor(x - radius) >> 4;
+             cx <= (net.minecraft.util.Mth.floor(x + radius) >> 4); cx++) {
+            for (int cz = net.minecraft.util.Mth.floor(z - radius) >> 4;
+                 cz <= (net.minecraft.util.Mth.floor(z + radius) >> 4); cz++) {
+                double dx = Math.max(Math.max(cx * 16.0 - x, x - (cx + 1) * 16.0), 0);
+                double dz = Math.max(Math.max(cz * 16.0 - z, z - (cz + 1) * 16.0), 0);
+                if (dx * dx + dz * dz <= radius * radius && !state.level.hasChunk(cx, cz)) {
+                    return false;
+                }
+            }
+        }
+        List<SoldierEntity> observers = new ArrayList<>();
+        for (UUID id : state.recipients) {
+            if (state.level.getEntity(id) instanceof SoldierEntity soldier && soldier.isAlive()) {
+                observers.add(soldier);
+            }
+        }
+        if (observers.isEmpty()) return false;
+        for (LivingEntity enemy : state.level.getEntitiesOfClass(LivingEntity.class,
+            new AABB(x - radius, y - 6, z - radius, x + radius, y + 6, z + radius))) {
+            double dx = enemy.getX() - x;
+            double dz = enemy.getZ() - z;
+            if (dx * dx + dz * dz > radius * radius || Math.abs(enemy.getY() - y) > 6) continue;
+            for (SoldierEntity soldier : observers) {
+                if (!TargetAcquisition.isValidTarget(soldier, enemy)
+                    || soldier.isFriendlyTo(enemy) || !soldier.isProactiveTarget(enemy)
+                    || !soldier.canAttack(enemy)) continue;
+                // Same combat categories, without detection or line-of-sight requirements.
+                if (enemy instanceof SoldierEntity || enemy instanceof Player
+                    || (enemy instanceof TargetEntity && soldier.fofCategoryAllows(
+                        FofCategory.TARGET_DUMMIES, StevesArmyConfig.shouldTargetTargetEntities()))
+                    || (enemy instanceof Monster && soldier.fofCategoryAllows(
+                        FofCategory.MONSTERS, StevesArmyConfig.shouldTargetMonsters()))) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /** Continue the same recipient roster even after the activity becomes HOLD. */
+    private static void tickRegrouping(MinecraftServer server, ClearingState state,
+                                      SquadActivityManager.AttackActivityView activity) {
+        long now = state.level.getGameTime();
+        for (UUID id : new HashSet<>(state.recipients)) {
+            if (!(state.level.getEntity(id) instanceof SoldierEntity soldier)) continue;
+            if (!soldier.isAlive()) {
+                state.recipients.remove(id);
+                state.arrived.remove(id);
+                continue;
+            }
+            if (state.arrived.contains(id)) continue;
+            Integer generation = state.catchUpGenerations.get(id);
+            if (generation != null) {
+                if (soldier.getPingMoveGeneration() != generation
+                    || !soldier.hasGoToNavigationOwnership()) {
+                    // A newer player command owns this soldier. Never reclaim it.
+                    state.recipients.remove(id);
+                    state.catchUpGenerations.remove(id);
+                    SoldierFlightRecorder.event(soldier, "regroup", "superseded", generation);
+                } else if (soldier.isGoToHolding()) {
+                    // Ordinary GO_TO already performed the cover/endpoint handoff.
+                    state.arrived.add(id);
+                    SoldierFlightRecorder.event(soldier, "regroup", "arrived", soldier.blockPosition());
+                }
+                continue; // Normal GO_TO owns all path recovery and combat pauses.
+            }
+            if (insideArea(state, soldier.blockPosition())) {
+                holdArrivedSoldier(state, soldier);
+                state.arrived.add(id);
+                SoldierFlightRecorder.event(soldier, "regroup", "arrived", soldier.blockPosition());
+                continue;
+            }
+            soldier.clearAttackTarget();
+            soldier.receivePing(PingType.GO_TO, Vec3.atBottomCenterOf(state.objective));
+            state.catchUpGenerations.put(id, soldier.getPingMoveGeneration());
+            SoldierFlightRecorder.event(soldier, "regroup", "go-to-issued", state.objective);
+        }
+
+        int pending = state.recipients.size() - state.arrived.size();
+        if (!state.completeRequested && !state.recipients.isEmpty()
+            && state.arrived.size() * 2 > state.recipients.size()
+            && isActualEnemyAreaClear(state)) {
+            state.completeRequested = true;
+            state.completedAtTick = now;
+            state.stage = ClearingStage.SECURED;
+            completeOrder(server, state, activity);
+        }
+        if (pending != state.lastSyncedPending) {
+            state.lastSyncedPending = pending;
+            ServerPlayer owner = server.getPlayerList().getPlayer(activity.ownerId());
+            if (owner != null) SquadActivityManager.sync(owner);
+        }
+    }
+
+    private static void holdArrivedSoldier(ClearingState state, SoldierEntity soldier) {
+        soldier.clearAttackTarget();
+        soldier.clearPingMoveTarget();
+        soldier.setSquadMode(SquadMode.HOLD);
+        soldier.setHoldPosition(soldier.blockPosition());
+        soldier.clearFormationOffset();
+        soldier.getNavigation().stop();
+        // Preserve occupied cover/reservations and intel; cancel only an unfinished move.
+        var manager = soldier.getCoverBehaviorManager();
+        if (manager.getCurrentCover() != null
+            && !insideArea(state, manager.getCurrentCover().getPosition())) {
+            manager.clearCover();
+        }
+        var target = manager.getTargetCover();
+        if (target != null) {
+            CoverReservationManager.release(target.getPosition(), soldier);
+            manager.clearTargetCover();
+        }
+        if (manager.getCurrentCover() == null) {
+            soldier.cancelCoverMovement();
+            manager.setState(com.stevesarmy.combat.cover.CoverBehaviorManager.CoverState.NO_COVER);
+        } else {
+            manager.setState(com.stevesarmy.combat.cover.CoverBehaviorManager.CoverState.IN_COVER);
+        }
+    }
+
+    public static boolean isRegrouping(UUID ownerId, FireTeam team, long generation) {
+        ClearingState state = stateFor(ownerId, team);
+        return state != null && state.generation == generation && state.regrouping;
+    }
+
+    public static int regroupingCount(UUID ownerId, FireTeam team, long generation) {
+        ClearingState state = stateFor(ownerId, team);
+        return state != null && state.generation == generation && state.regrouping
+            ? state.recipients.size() - state.arrived.size() : 0;
+    }
+
+    public static void detachRecipients(UUID ownerId, Set<UUID> recipients) {
+        EnumMap<FireTeam, ClearingState> teams = STATES.get(ownerId);
+        if (teams == null) return;
+        for (ClearingState state : teams.values()) {
+            for (UUID id : recipients) {
+                state.recipients.remove(id);
+                state.arrived.remove(id);
+                Integer generation = state.catchUpGenerations.remove(id);
+                if (generation != null && state.level != null
+                    && state.level.getEntity(id) instanceof SoldierEntity soldier) {
+                    soldier.clearPingMoveTargetIfGeneration(generation);
+                }
+            }
+        }
+    }
+
+    public static void cancelOrder(UUID ownerId, FireTeam scope) {
+        EnumMap<FireTeam, ClearingState> teams = STATES.get(ownerId);
+        if (teams == null) return;
+        for (FireTeam team : new HashSet<>(teams.keySet())) {
+            if (scope != FireTeam.ALL && scope != team) continue;
+            ClearingState state = teams.remove(team);
+            if (state.level == null) continue;
+            for (var entry : state.catchUpGenerations.entrySet()) {
+                if (state.level.getEntity(entry.getKey()) instanceof SoldierEntity soldier
+                    && soldier.getPingMoveGeneration() == entry.getValue()) {
+                    soldier.clearPingMoveTargetIfGeneration(entry.getValue());
+                }
+            }
+        }
+        if (teams.isEmpty()) STATES.remove(ownerId);
+    }
+
     private static void completeOrder(MinecraftServer server, ClearingState state,
                                       SquadActivityManager.AttackActivityView activity) {
         SquadActivityManager.completeAttackToHold(activity.ownerId(), activity.fireTeam(),
             activity.objective());
         ServerPlayer owner = server.getPlayerList().getPlayer(activity.ownerId());
         if (owner != null) {
-            owner.sendSystemMessage(Component.literal("[Squad] Area secured."));
+            owner.sendSystemMessage(Component.literal(
+                "[Squad] Area secured. All clear - holding position."));
         }
         StevesArmyMod.LOGGER.info("[AttackClear] order {} {} secured at {} (pois={}, checked={})",
             activity.ownerId(), activity.fireTeam(), activity.objective(),
@@ -1009,7 +1192,7 @@ public final class ClearingCoordinator {
      */
     public static boolean isInsideClearingArea(SoldierEntity soldier, BlockPos pos) {
         ClearingState state = stateForSoldier(soldier);
-        return state != null && state.areaCells.contains(pos.asLong());
+        return state != null && insideArea(state, pos);
     }
 
     /**
@@ -1072,6 +1255,34 @@ public final class ClearingCoordinator {
     }
 
     /**
+     * Fail-closed concession: the assigned soldier has proven it can neither
+     * check this obligation nor advance on it (bounded failed searches, no
+     * walkable route). Mark it checked so the order can settle or report
+     * STALLED instead of hanging on a soldier frozen between the two — the
+     * same skip precedent as {@link #skipBehindEveryone}. A later observation
+     * re-arms the check through the normal renewed-obligation path. Counts as
+     * progress: concessions un-latch the stall report like a real check.
+     *
+     * @return true when this call marked the target checked.
+     */
+    public static boolean concedePoi(SoldierEntity soldier, BlockPos poi) {
+        ClearingState state = stateForSoldier(soldier);
+        if (state == null || poi == null) {
+            return false;
+        }
+        if (!isTargetStillOpen(soldier, poi)) {
+            return false;
+        }
+        long now = state.level.getGameTime();
+        if (state.checkedTick.putIfAbsent(poi.asLong(), now) == null) {
+            state.lastCheckTick = now;
+            noteProgress(state, now);
+            return true;
+        }
+        return false;
+    }
+
+    /**
      * True when a candidate dock position has line of sight to this soldier's
      * clearing check target — a dock that cannot observe the blind spot keeps
      * the soldier busy without ever contributing a check.
@@ -1094,7 +1305,7 @@ public final class ClearingCoordinator {
         }
 
         long now = state.level.getGameTime();
-        boolean inside = state.areaCells.contains(soldier.blockPosition().asLong());
+        boolean inside = insideArea(state, soldier.blockPosition());
 
         BlockPos assignedPoi = state.claims.get(soldier.getUUID());
         boolean poiChecked = assignedPoi != null
@@ -1238,7 +1449,7 @@ public final class ClearingCoordinator {
 
     /**
      * Sim/report seam: completion is ARMED — every check ran and every contact
-     * resolved, only physical completion (all-inside settle) remains. This is
+     * resolved, only physical arrival remains. This is
      * the direct "all obligations resolved" signal ordering asserts use; the
      * same predicate drives the executor's SECURE assemble pull.
      */
@@ -1279,12 +1490,7 @@ public final class ClearingCoordinator {
 
     public static void clearAll() {
         STATES.clear();
-        NO_SETTLE_DIAG_LAST.clear();
     }
-
-    /** TEMP Wave-A diagnostic: per-state rate-limit clock for the no-settle diag. */
-    private static final java.util.IdentityHashMap<ClearingState, Long> NO_SETTLE_DIAG_LAST =
-        new java.util.IdentityHashMap<>();
 
     private static ClearingState stateFor(UUID ownerId, FireTeam team) {
         EnumMap<FireTeam, ClearingState> byTeam = STATES.get(ownerId);

@@ -145,6 +145,8 @@ public class SoldierEntity extends PathfinderMob implements Container {
         SynchedEntityData.defineId(SoldierEntity.class, EntityDataSerializers.INT);
     private static final EntityDataAccessor<BlockPos> PEEK_POSITION =
         SynchedEntityData.defineId(SoldierEntity.class, EntityDataSerializers.BLOCK_POS);
+    private static final EntityDataAccessor<Boolean> CORNER_PEEK_CROUCH =
+        SynchedEntityData.defineId(SoldierEntity.class, EntityDataSerializers.BOOLEAN);
     private static final EntityDataAccessor<Boolean> LOW_CROUCHING =
         SynchedEntityData.defineId(SoldierEntity.class, EntityDataSerializers.BOOLEAN);
     private static final EntityDataAccessor<Float> HALF_COVER_RISE_PROGRESS =
@@ -154,6 +156,8 @@ public class SoldierEntity extends PathfinderMob implements Container {
     private static final EntityDataAccessor<Boolean> RELOAD_PENDING =
         SynchedEntityData.defineId(SoldierEntity.class, EntityDataSerializers.BOOLEAN);
     private static final EntityDataAccessor<Boolean> TACTICAL_RELOADING =
+        SynchedEntityData.defineId(SoldierEntity.class, EntityDataSerializers.BOOLEAN);
+    private static final EntityDataAccessor<Boolean> ANIMATION_WEAPON_READY =
         SynchedEntityData.defineId(SoldierEntity.class, EntityDataSerializers.BOOLEAN);
     
     private static final EntityDataAccessor<Float> THREAT_DIR_X =
@@ -233,6 +237,7 @@ public class SoldierEntity extends PathfinderMob implements Container {
     private boolean vehicleCrewActive;
     private final ThreatAwareness threatAwareness;
     private final com.stevesarmy.entity.ai.TravelCrawlController travelCrawl;
+    private final com.stevesarmy.entity.ai.SoldierMovementController movementController;
     private final GrenadeTacticalController grenadeTacticalController;
     private final SoldierHealController healController;
     
@@ -270,7 +275,20 @@ public class SoldierEntity extends PathfinderMob implements Container {
     private long attackTargetTimestamp = 0;
     private static final long ATTACK_MEMORY_MS = 60000;
     private int attackGeneration = 0;
-    
+
+    /** Cached advance-spine route for the current attack command; not persisted —
+     * the owning goal rebuilds it per command and nulls it on reset. Exposed here
+     * so the cover scorer (a different package) can read path-based progression. */
+    private transient com.stevesarmy.entity.ai.pathfinding.AdvanceSpine attackSpine = null;
+
+    public com.stevesarmy.entity.ai.pathfinding.AdvanceSpine getAttackSpine() {
+        return attackSpine;
+    }
+
+    public void setAttackSpine(com.stevesarmy.entity.ai.pathfinding.AdvanceSpine spine) {
+        this.attackSpine = spine;
+    }
+
     private BlockPos pingThreatPos = null;
     private long pingThreatTimestamp = 0;
     private static final long PING_THREAT_MEMORY_MS = 20000;
@@ -358,6 +376,10 @@ public class SoldierEntity extends PathfinderMob implements Container {
         // dock completes (or the threat closes inside the overrun range).
         if (moveControl instanceof com.stevesarmy.entity.ai.CoverPositionController ctrl
             && ctrl.shouldDeferCqbHold()) {
+            return;
+        }
+
+        if (movementController != null && movementController.canBypassCqbHold()) {
             return;
         }
 
@@ -478,6 +500,7 @@ public class SoldierEntity extends PathfinderMob implements Container {
         this.peekController = new PeekController();
         this.threatAwareness = new ThreatAwareness();
         this.travelCrawl = new com.stevesarmy.entity.ai.TravelCrawlController(this);
+        this.movementController = new com.stevesarmy.entity.ai.SoldierMovementController(this);
         this.grenadeTacticalController = new GrenadeTacticalController(this);
         this.healController = new SoldierHealController(this);
         this.inventory.setMainHandChangedCallback(stack -> {
@@ -550,11 +573,12 @@ public class SoldierEntity extends PathfinderMob implements Container {
         this.entityData.define(PEEK_STATE, 0);
         this.entityData.define(PEEK_POSITION, BlockPos.ZERO);
         this.entityData.define(LOW_CROUCHING, false);
+        this.entityData.define(CORNER_PEEK_CROUCH, false);
         this.entityData.define(HALF_COVER_RISE_PROGRESS, 1.0f);
         this.entityData.define(HALF_COVER_RISING, false);
         this.entityData.define(RELOAD_PENDING, false);
         this.entityData.define(TACTICAL_RELOADING, false);
-        
+        this.entityData.define(ANIMATION_WEAPON_READY, false);
         this.entityData.define(THREAT_DIR_X, 0f);
         this.entityData.define(THREAT_DIR_Y, 0f);
         this.entityData.define(THREAT_DIR_Z, 0f);
@@ -1115,9 +1139,10 @@ public class SoldierEntity extends PathfinderMob implements Container {
 
     /** True when the other entity shares the soldier's (or owner's) scoreboard team. */
     private boolean isAlliedByTeam(LivingEntity other) {
-        Team otherTeam = other.getTeam();
+        Team otherTeam = other instanceof SoldierEntity soldier
+            ? TeamManager.getEffectiveTeam(soldier) : other.getTeam();
         if (otherTeam == null) return false;
-        Team soldierTeam = getTeam();
+        Team soldierTeam = TeamManager.getEffectiveTeam(this);
         if (soldierTeam != null && soldierTeam.isAlliedTo(otherTeam)) return true;
         LivingEntity owner = getOwner();
         Team ownerTeam = owner != null ? owner.getTeam() : null;
@@ -1301,10 +1326,8 @@ public class SoldierEntity extends PathfinderMob implements Container {
     }
 
     /**
-     * Soldiers drop their whole persistent inventory inside ONE supply pouch
-     * instead of vanishing with it (or showering item entities). Replaces
-     * vanilla's 8.5%-per-slot chance loop, which would roll duplicates against
-     * the mirrored SoldierInventory.
+     * Drop guns and one carried ammo stack per caliber loose, with the rest in
+     * a pouch. Only the persistent inventory is used, never mirrored equipment.
      */
     @Override
     protected void dropCustomDeathLoot(net.minecraft.world.damagesource.DamageSource source,
@@ -1312,20 +1335,56 @@ public class SoldierEntity extends PathfinderMob implements Container {
         if (!StevesArmyConfig.isSoldierDeathDropsEnabled()) {
             return;
         }
-        boolean anyItems = false;
+        List<ItemStack> guns = new ArrayList<>();
+        boolean[] loose = new boolean[inventory.getContainerSize()];
         for (int i = 0; i < inventory.getContainerSize(); i++) {
-            if (!inventory.getItem(i).isEmpty()) {
-                anyItems = true;
-                break;
+            ItemStack stack = inventory.getItem(i);
+            InfiniteReserveAmmo.stripInfiniteReserveNbt(stack);
+            if (GunIntegration.isGun(stack)) {
+                guns.add(stack);
+                loose[i] = true;
             }
         }
-        if (!anyItems) {
-            return;
+
+        // Prefer ordinary ammo over boxes, without making TaCZ a required dependency.
+        Class<?> ammoBoxClass = null;
+        try {
+            ammoBoxClass = Class.forName("com.tacz.guns.api.item.IAmmoBox");
+        } catch (ClassNotFoundException ignored) {
         }
+        java.util.Set<String> ammoTypes = new java.util.HashSet<>();
+        for (ItemStack gun : guns) {
+            String ammoId = GunIntegration.getAmmoId(gun);
+            if (ammoId.isEmpty() || !ammoTypes.add(ammoId)) continue;
+            int boxSlot = -1;
+            int ammoSlot = -1;
+            for (int i = 0; i < inventory.getContainerSize(); i++) {
+                ItemStack stack = inventory.getItem(i);
+                if (loose[i] || GunIntegration.getAmmoCountForGun(gun, stack) <= 0) continue;
+                if (ammoBoxClass != null && ammoBoxClass.isInstance(stack.getItem())) {
+                    if (boxSlot < 0) boxSlot = i;
+                } else {
+                    ammoSlot = i;
+                    break;
+                }
+            }
+            int selected = ammoSlot >= 0 ? ammoSlot : boxSlot;
+            if (selected >= 0) loose[selected] = true;
+        }
+
+        SoldierInventory pouchInventory = new SoldierInventory();
         for (int i = 0; i < inventory.getContainerSize(); i++) {
-            InfiniteReserveAmmo.stripInfiniteReserveNbt(inventory.getItem(i));
+            ItemStack stack = inventory.getItem(i);
+            if (stack.isEmpty()) continue;
+            if (loose[i]) {
+                spawnAtLocation(stack.copy());
+            } else {
+                pouchInventory.setItem(i, stack.copy());
+            }
         }
-        com.stevesarmy.inventory.PouchContainer.dropInventoryAsPouch(this, inventory);
+        if (!pouchInventory.isEmpty()) {
+            com.stevesarmy.inventory.PouchContainer.dropInventoryAsPouch(this, pouchInventory);
+        }
         for (int i = 0; i < inventory.getContainerSize(); i++) {
             inventory.setItem(i, ItemStack.EMPTY);
         }
@@ -1453,19 +1512,15 @@ public class SoldierEntity extends PathfinderMob implements Container {
         return this.isAlive() && this.distanceTo(player) <= 64.0F;
     }
 
-    /** Feeds the squad's shared danger map (first member per tick does the work; no-op without a squad). */
-    private void tickSquadDangerMap() {
-        if (!(level() instanceof ServerLevel serverLevel)) return;
-        UUID squad = getSquadId();
-        if (squad == null) return;
-        com.stevesarmy.squad.SquadManager.get(serverLevel).getSquadById(squad)
-            .ifPresent(data -> data.tickDangerMap(serverLevel, serverLevel.getGameTime(), position()));
-    }
-
     public void tick() {
+        if (!this.level().isClientSide) {
+            movementController.beginTick();
+            travelCrawl.tick();
+        }
         super.tick();
         if (this.level().isClientSide) {
             com.stevesarmy.network.SyncSoldierInventoryPacket.applyPendingInventory(this);
+            tickCrawlRenderAmount();
         }
         
         if (!this.level().isClientSide) {
@@ -1474,8 +1529,7 @@ public class SoldierEntity extends PathfinderMob implements Container {
             threatAwareness.tick();
             holdMovementForReload();
             updateCrawlFacing();
-            tickSquadDangerMap();
-            travelCrawl.tick();
+            movementController.finishTick();
             // Reload and cover helpers may hold navigation and update their own
             // crouch state. A live firing-prone plan remains the authoritative
             // posture until that plan explicitly cancels it.
@@ -1483,6 +1537,7 @@ public class SoldierEntity extends PathfinderMob implements Container {
                 setLowCrouching(true);
             }
             tickHalfCoverRiseProgress();
+            tickAnimationWeaponReady();
             traceRotationSnapshot();
             tracePeekSnapshot();
         }
@@ -1501,7 +1556,12 @@ public class SoldierEntity extends PathfinderMob implements Container {
                            || coverState == CoverBehaviorManager.CoverState.SUPPRESSED_IN_COVER.ordinal();
             boolean isHalfCover = getSyncedCoverCurrentType() == CoverType.HALF.ordinal();
 
-            if (inCover && isHalfCover) {
+            if (entityData.get(CORNER_PEEK_CROUCH)) {
+                if (this.getPose() != Pose.CROUCHING) {
+                    this.setPose(Pose.CROUCHING);
+                    this.refreshDimensions();
+                }
+            } else if (inCover && isHalfCover) {
                 Pose coverPose = isHalfCoverRising() ? Pose.CROUCHING
                     : getSyncedCoverCurrentHeight() >= 1.3f
                     ? Pose.STANDING : Pose.CROUCHING;
@@ -1518,6 +1578,82 @@ public class SoldierEntity extends PathfinderMob implements Container {
             }
         }
 
+    }
+
+    private Vec3 velocityBeforeTravel = Vec3.ZERO;
+
+    private void tickAnimationWeaponReady() {
+        if (isDeadOrDying()) {
+            animationWeaponReadyHoldTicks = 0;
+            entityData.set(ANIMATION_WEAPON_READY, false);
+            return;
+        }
+
+        LivingEntity target = getTarget();
+        boolean hasLiveTarget = target != null && target.isAlive();
+        boolean isAiming = GunIntegration.isAnyGunLoaded()
+            && GunIntegration.getAimProgress(this) > 0.0f;
+        boolean combatReady = hasLiveTarget
+            || (combatGoal != null && combatGoal.isSuppressing())
+            || isAiming
+            || isCornerPeekCrouching();
+
+        if (combatReady) {
+            animationWeaponReadyHoldTicks = ANIMATION_WEAPON_READY_HOLD_TICKS;
+            entityData.set(ANIMATION_WEAPON_READY, true);
+        } else if (animationWeaponReadyHoldTicks > 0) {
+            animationWeaponReadyHoldTicks--;
+            if (animationWeaponReadyHoldTicks == 0) {
+                entityData.set(ANIMATION_WEAPON_READY, false);
+            }
+        }
+    }
+
+    public boolean isAnimationWeaponReady() {
+        return entityData.get(ANIMATION_WEAPON_READY);
+    }
+
+    @Override
+    public void travel(Vec3 input) {
+        // LivingEntity.travel adds walking acceleration before calling move.
+        // Only the velocity entering travel can identify an external impulse;
+        // the accelerated velocity would exempt ordinary fast walking.
+        velocityBeforeTravel = getDeltaMovement();
+        try {
+            super.travel(input);
+            if (moveControl instanceof com.stevesarmy.entity.ai.CoverPositionController ctrl) {
+                setDeltaMovement(ctrl.getSpeedController().finishTravel(getDeltaMovement()));
+            }
+        } finally {
+            velocityBeforeTravel = Vec3.ZERO;
+        }
+    }
+
+    @Override
+    public void knockback(double strength, double x, double z) {
+        Vec3 before = getDeltaMovement();
+        super.knockback(strength, x, z);
+        if (moveControl instanceof com.stevesarmy.entity.ai.CoverPositionController ctrl
+            && getDeltaMovement().subtract(before).horizontalDistanceSqr() > 1.0e-10) {
+            ctrl.getSpeedController().markExternalImpulse();
+        }
+    }
+
+    @Override
+    public void move(net.minecraft.world.entity.MoverType type, Vec3 movement) {
+        if (type == net.minecraft.world.entity.MoverType.SELF
+            && moveControl instanceof com.stevesarmy.entity.ai.CoverPositionController ctrl) {
+            Vec3 velocity = getDeltaMovement();
+            boolean velocityMove = movement.distanceToSqr(velocity) < 1.0e-12;
+            movement = ctrl.getSpeedController().limitSelfMovement(movement, velocityBeforeTravel);
+            if (velocityMove) {
+                // Vanilla travel applies drag to getDeltaMovement after move returns.
+                // Feed it the bounded velocity, rather than retaining acceleration
+                // that was never physically applied (including during knockback).
+                setDeltaMovement(movement.x, velocity.y, movement.z);
+            }
+        }
+        super.move(type, movement);
     }
 
     @Override
@@ -1629,6 +1765,17 @@ public class SoldierEntity extends PathfinderMob implements Container {
         if (coverWatchdogStillTicks >= COVER_WATCHDOG_STILL_TICKS) {
             coverWatchdogStillTicks = 0;
             coverWatchdogLastPos = pos;
+            // Pinned-dock protection (suppressedRelocationSafeRoute): while the
+            // soldier is under fire and not yet recovered, the watchdog must
+            // NOT strip the cover claim via the legacy full reset — cancel the
+            // stalled move and re-hold instead. GO_TO relocations and fully
+            // recovered soldiers keep the legacy reset (handled inside the goal).
+            if (StevesArmyConfig.isSuppressedRelocationSafeRoute()
+                && !coverBehaviorManager.getSuppressionTracker().isRecovered()
+                && coverTacticalGoal instanceof CoverTacticalGoal tacticalGoal) {
+                tacticalGoal.holdFromStuckWatchdog();
+                return;
+            }
             coverTacticalGoal.resetFromStuckWatchdog();
         }
     }
@@ -1642,7 +1789,7 @@ public class SoldierEntity extends PathfinderMob implements Container {
         if (!this.level().isClientSide) {
             VS2Compat.onSoldierRemoved(this);
             com.stevesarmy.combat.VehicleCrewManager.releaseAllFor(this.getUUID());
-            TeamManager.removeFromTeam(this);
+            if (reason.shouldDestroy()) TeamManager.removeFromTeam(this);
             com.stevesarmy.combat.cover.CoverReservationManager.releaseAll(this);
             com.stevesarmy.combat.VpbEntityState.remove(this.getUUID());
             com.stevesarmy.compat.sbw.SbwEntityState.remove(this.getUUID());
@@ -2177,6 +2324,11 @@ public BlockPos getPingMoveTarget() {
     public void configureInfiniteReserveAmmo() {
     }
 
+    /** Read-only labels for the explicitly enabled flight recorder. */
+    public java.util.List<String> getTraceRunningGoals() {
+        return goalSelector.getRunningGoals().map(g -> g.getPriority() + ":" + g.getGoal().getClass().getSimpleName()).toList();
+    }
+
     public CoverGoalController getCoverTacticalGoal() {
         return coverTacticalGoal;
     }
@@ -2365,6 +2517,16 @@ public BlockPos getPingMoveTarget() {
     public int getSyncedPeekState() {
         return this.entityData.get(PEEK_STATE);
     }
+
+    /** Client render hint for the exposed half-cover idle; never changes gameplay posture. */
+    public boolean isHalfCoverPeekIdle() {
+        int state = getSyncedCoverState();
+        boolean inCover = state == CoverBehaviorManager.CoverState.IN_COVER.ordinal()
+            || state == CoverBehaviorManager.CoverState.SUPPRESSED_IN_COVER.ordinal();
+        return !this.level().isClientSide || (inCover
+            && getSyncedCoverCurrentType() == CoverType.HALF.ordinal()
+            && getSyncedPeekState() == PeekController.State.EXPOSED.ordinal());
+    }
     
     public void syncPeekPosition(BlockPos pos) {
         this.entityData.set(PEEK_POSITION, pos);
@@ -2377,10 +2539,30 @@ public BlockPos getPingMoveTarget() {
     private int emergencyEngagementPostureUntilTick = -1;
     private static final double CRAWL_MOVEMENT_SPEED_SQR = 0.0004D;
     private static final float CRAWL_TURN_RATE_DEGREES = 25.0F;
+    private static final int ANIMATION_WEAPON_READY_HOLD_TICKS = 20;
+    private int animationWeaponReadyHoldTicks;
+
+    /** Normal crouch owned by the bounded corner excursion; crawl/prone keep priority. */
+    public void setCornerPeekCrouching(boolean active) {
+        if (level().isClientSide) return;
+        entityData.set(CORNER_PEEK_CROUCH, active);
+        if (!isLowCrouching()) {
+            setPose(active ? Pose.CROUCHING : Pose.STANDING);
+            refreshDimensions();
+        }
+    }
+
+    public boolean isCornerPeekCrouching() { return entityData.get(CORNER_PEEK_CROUCH); }
 
     public void setLowCrouching(boolean lowCrouch) {
         if (this.level().isClientSide) {
             return;
+        }
+
+        // A route approved only at crawl height cannot be invalidated by a
+        // competing combat/cover stand request. Route owners release this first.
+        if (!lowCrouch && movementController != null && movementController.isMandatoryCrawl()) {
+            lowCrouch = true;
         }
 
         // Soldiers aboard ships never crawl: the crawl pose re-dimensions a
@@ -2427,6 +2609,32 @@ public BlockPos getPingMoveTarget() {
     
     public boolean isLowCrouching() {
         return entityData.get(LOW_CROUCHING);
+    }
+
+    /**
+     * Render-side crawl amount (0..1, client tick maintained) so the prone
+     * pose/rotation path lights up on LAND: vanilla only feeds swimAmount in
+     * water, which left every land crawler rendering as a standing walk no
+     * matter what SoldierModel's prone pose wanted to draw.
+     */
+    private float crawlRenderAmount = 0.0F;
+    private float oldCrawlRenderAmount = 0.0F;
+
+    @Override
+    public float getSwimAmount(float partialTick) {
+        float vanilla = super.getSwimAmount(partialTick);
+        float crawl = net.minecraft.util.Mth.lerp(partialTick, oldCrawlRenderAmount, crawlRenderAmount);
+        return Math.max(vanilla, crawl);
+    }
+
+    private void tickCrawlRenderAmount() {
+        oldCrawlRenderAmount = crawlRenderAmount;
+        float target = isLowCrouching() ? 1.0F : 0.0F;
+        if (crawlRenderAmount < target) {
+            crawlRenderAmount = Math.min(target, crawlRenderAmount + 0.25F);
+        } else if (crawlRenderAmount > target) {
+            crawlRenderAmount = Math.max(target, crawlRenderAmount - 0.25F);
+        }
     }
 
     /** True while low-crouching movement has a stable horizontal travel direction. */
@@ -2622,6 +2830,10 @@ public BlockPos getPingMoveTarget() {
     /** Universal suppressed-movement posture controller (dangerTravelResponse). */
     public com.stevesarmy.entity.ai.TravelCrawlController getTravelCrawlController() {
         return travelCrawl;
+    }
+
+    public com.stevesarmy.entity.ai.SoldierMovementController getMovementController() {
+        return movementController;
     }
     
     public void syncThreatDirection(Vec3 direction) {

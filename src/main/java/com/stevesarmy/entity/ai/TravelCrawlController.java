@@ -21,13 +21,11 @@ import java.util.UUID;
  * prone-firing soldier up.
  */
 public class TravelCrawlController {
-    private static final double CRAWL_TRAVEL_SPEED = 0.65D;
     private static final int CHECK_INTERVAL_TICKS = 10;
 
     private final SoldierEntity soldier;
     private boolean crawlActive;
-    /** Navigation speed modifier observed when the crawl engaged; restored on exit. */
-    private double restoredSpeedModifier = -1.0D;
+    private boolean mandatoryPoseActive;
     private int checkTimer;
     /** Last evaluation result, for the coverstate debug card. */
     private boolean crawlHidesHere;
@@ -38,6 +36,20 @@ public class TravelCrawlController {
     }
 
     public void tick() {
+        if (soldier.getMovementController().isMandatoryCrawl()) {
+            mandatoryPoseActive = true;
+            if (!soldier.isFiringProne()) soldier.setLowCrouching(true);
+            crawlHidesHere = true;
+            return;
+        }
+        if (mandatoryPoseActive) {
+            mandatoryPoseActive = false;
+            checkTimer = 1;
+            if (!crawlActive && !soldier.isFiringProne()
+                && soldier.getCoverBehaviorManager().getCurrentCover() == null) {
+                soldier.setLowCrouching(false);
+            }
+        }
         if (!StevesArmyConfig.isDangerTravelResponseEnabled()) {
             disengage("config-off");
             return;
@@ -45,17 +57,13 @@ public class TravelCrawlController {
         // Prone firing owns the shared pose; leave it alone entirely.
         if (soldier.isFiringProne()) return;
 
-        // Goals re-path with their own speed modifier (moveTo overwrites it);
-        // re-assert the crawl speed every tick while engaged.
-        if (crawlActive) {
-            soldier.getNavigation().setSpeedModifier(CRAWL_TRAVEL_SPEED);
-        }
+        // Posture/state only. SoldierSpeedController resolves the crawl cap at
+        // movement consumption time, using the current attribute and raw goal request.
 
         if (--checkTimer > 0) return;
         checkTimer = CHECK_INTERVAL_TICKS;
 
-        boolean suppressed = soldier.getCoverBehaviorManager().getSuppressionLevel()
-            >= SuppressionTracker.PRESSURED_THRESHOLD;
+        boolean suppressed = suppressionFreshAndPressured();
         boolean moving = !soldier.getNavigation().isDone();
         crawlHidesHere = dangerMapSaysCrawlHides();
 
@@ -69,11 +77,22 @@ public class TravelCrawlController {
         }
     }
 
+    /**
+     * Pressured AND actively being fired at: the level alone decays slowly
+     * (peak-suppression slowdown), so a soldier would otherwise stay low long
+     * after the fire shifted. Requiring a recent suppression event bounds the
+     * crawl to soldiers actually under fire.
+     */
+    private boolean suppressionFreshAndPressured() {
+        return soldier.getCoverBehaviorManager().getSuppressionLevel()
+                >= SuppressionTracker.PRESSURED_THRESHOLD
+            && soldier.getCoverBehaviorManager().getSuppressionTracker()
+                .wasRecentlySuppressed();
+    }
+
     private void engage() {
         crawlActive = true;
-        restoredSpeedModifier = navSpeed();
         soldier.setLowCrouching(true);
-        soldier.getNavigation().setSpeedModifier(CRAWL_TRAVEL_SPEED);
         if (DiagnosticLogManager.isCoverLoggingEnabled()) {
             StevesArmyMod.LOGGER.info("[TravelResponse] Soldier {} going low - crawling hides here (suppression={})",
                 soldier.getId(), String.format("%.2f", soldier.getCoverBehaviorManager().getSuppressionLevel()));
@@ -83,16 +102,9 @@ public class TravelCrawlController {
     private void disengage(String reason) {
         if (!crawlActive) return;
         crawlActive = false;
-        if (!soldier.isFiringProne()) {
+        if (!soldier.isFiringProne() && !soldier.getMovementController().isMandatoryCrawl()) {
             soldier.setLowCrouching(false);
         }
-        // Restore the pre-crawl speed only if nothing else claimed the modifier
-        // meanwhile (a goal's own moveTo already carries its intended speed).
-        if (restoredSpeedModifier >= 0.0D
-                && Math.abs(navSpeed() - CRAWL_TRAVEL_SPEED) < 1.0e-4D) {
-            soldier.getNavigation().setSpeedModifier(restoredSpeedModifier);
-        }
-        restoredSpeedModifier = -1.0D;
         if (DiagnosticLogManager.isCoverLoggingEnabled()) {
             StevesArmyMod.LOGGER.info("[TravelResponse] Soldier {} standing back up ({})",
                 soldier.getId(), reason);
@@ -111,12 +123,7 @@ public class TravelCrawlController {
     }
 
     public boolean isCrawlActive() {
-        return crawlActive;
-    }
-
-    private double navSpeed() {
-        return soldier.getNavigation() instanceof SoldierGroundNavigation nav
-            ? nav.getNavSpeedModifier() : 1.0D;
+        return crawlActive || soldier.getMovementController().isMandatoryCrawl();
     }
 
     public boolean isCrawlHidingHere() {

@@ -9,7 +9,12 @@
     "GunItemRendererMixin",
     "MinecraftGlowMixin",
     "MouseHandlerWheelMixin",
+    "KeyboardHandlerWheelMixin",
     "SoldierItemInHandLayerMixin"
+  ],
+  "mixins": [
+    "SoldierTrackingRangeMixin",
+    "SoldierTrackingRefreshMixin"
   ],
   "injectors": {
     "defaultRequire": 1
