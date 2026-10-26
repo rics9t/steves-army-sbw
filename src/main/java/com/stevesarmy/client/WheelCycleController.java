@@ -1,5 +1,6 @@
 package com.stevesarmy.client;
 
+import com.stevesarmy.StevesArmyMod;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.network.chat.Component;
@@ -60,7 +61,9 @@ public final class WheelCycleController {
     }
 
     private static void cyclePage() {
+        Page previousPage = page;
         page = page == Page.PING_ORDERS ? Page.VEHICLE : Page.PING_ORDERS;
+        StevesArmyMod.LOGGER.info("Wheel page switched: {} -> {}", previousPage, page);
     }
 
     public static boolean isVehiclePage() {

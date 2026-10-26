@@ -22,6 +22,8 @@ import net.minecraft.world.phys.Vec3;
 import org.lwjgl.glfw.GLFW;
 
 public class PingWheelHandler {
+    public record MouseDelta(double x, double y) {}
+
     private static final RateLimiter rateLimiter = new RateLimiter();
     private static final int HOLD_TIME_MS = 150;
 
@@ -183,10 +185,7 @@ public class PingWheelHandler {
 
         double distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
 
-        StevesArmyMod.LOGGER.info("Mouse delta: ({}, {}) distance: {}", deltaX, deltaY, distance);
-
         if (distance < 30) {
-            StevesArmyMod.LOGGER.info("Center area selected, returning LOCATION");
             return PingType.LOCATION;
         }
 
@@ -201,12 +200,6 @@ public class PingWheelHandler {
         double sectorSize = 360.0 / numTypes;
         int sector = ((int) (adjustedDegrees / sectorSize)) % numTypes;
         PingType selectedType = PingType.values()[sector];
-
-        StevesArmyMod.LOGGER.info("Angle: {} deg, adjusted: {} deg, sector: {}, type: {}",
-            String.format("%.1f", degrees),
-            String.format("%.1f", adjustedDegrees),
-            sector,
-            selectedType);
 
         return selectedType;
     }
@@ -305,20 +298,14 @@ public class PingWheelHandler {
         return isWheelActive;
     }
 
-    public static double getDeltaX() {
+    /** Reads both cursor coordinates together for compatibility with virtual mouse backends. */
+    public static MouseDelta getMouseDelta() {
         Minecraft mc = Minecraft.getInstance();
         long windowHandle = mc.getWindow().getWindow();
         double[] xpos = new double[1];
-        GLFW.glfwGetCursorPos(windowHandle, xpos, null);
-        return xpos[0] - pressMouseX;
-    }
-
-    public static double getDeltaY() {
-        Minecraft mc = Minecraft.getInstance();
-        long windowHandle = mc.getWindow().getWindow();
         double[] ypos = new double[1];
-        GLFW.glfwGetCursorPos(windowHandle, null, ypos);
-        return ypos[0] - pressMouseY;
+        GLFW.glfwGetCursorPos(windowHandle, xpos, ypos);
+        return new MouseDelta(xpos[0] - pressMouseX, ypos[0] - pressMouseY);
     }
 
     public static PingType getHoveredType() {

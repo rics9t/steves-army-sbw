@@ -66,8 +66,9 @@ public class VehicleWheelHandler {
      * The page splits into equal sectors for its current action set. The center dead zone cancels.
      */
     private static TransportOrder determineActionFromMouse() {
-        double deltaX = PingWheelHandler.getDeltaX();
-        double deltaY = PingWheelHandler.getDeltaY();
+        PingWheelHandler.MouseDelta delta = PingWheelHandler.getMouseDelta();
+        double deltaX = delta.x();
+        double deltaY = delta.y();
 
         double distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
         if (distance < 30) {
