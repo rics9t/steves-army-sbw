@@ -21,6 +21,7 @@ import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.server.ServerStartedEvent;
 import net.minecraftforge.event.server.ServerStoppingEvent;
+import net.minecraftforge.eventbus.api.EventPriority;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 
 import java.util.ArrayList;
@@ -61,6 +62,7 @@ public final class SimManager {
     private static int queueIndex = 0;
     private static int yLevel = Y_BASE;
     private static boolean autorun = false;
+    private static boolean previousPerformanceMetricsEnabled;
 
     /**
      * sim.fastticks: 'auto' (default) = unthrottle iff sim.autorun; explicit
@@ -100,6 +102,10 @@ public final class SimManager {
     private static final Map<UUID, Integer> shotCounts = new HashMap<>();
     private static final List<SimScenario.ScheduledAction> sortedActions = new ArrayList<>();
     private static final List<ChunkPos> forcedChunks = new ArrayList<>();
+    private static final SimTickMetrics simTickMetrics = new SimTickMetrics();
+    private static long measuredTickStartedNanos;
+    private static int measuredTickRun = -1;
+    private static String performanceReport = "";
 
     private record ChunkPos(int x, int z) {}
 
@@ -179,6 +185,10 @@ public final class SimManager {
         sweepLeftoverFixtureBlocks();
         // Unarmed tail state from an aborted run must not leak into this session
         SimGunHandler.setArmed(false);
+        simTickMetrics.reset();
+        performanceReport = "";
+        previousPerformanceMetricsEnabled = com.stevesarmy.debug.PerformanceMetrics.isEnabled();
+        com.stevesarmy.debug.PerformanceMetrics.setEnabled(false);
         beginScenario();
         return true;
     }
@@ -208,6 +218,23 @@ public final class SimManager {
         }
     }
 
+    @SubscribeEvent(priority = EventPriority.HIGHEST)
+    public static void onSimulationTickStart(TickEvent.ServerTickEvent event) {
+        if (event.phase != TickEvent.Phase.START || phase != Phase.RUNNING) return;
+        measuredTickStartedNanos = System.nanoTime();
+        measuredTickRun = queueIndex;
+    }
+
+    @SubscribeEvent(priority = EventPriority.LOWEST)
+    public static void onSimulationTickEnd(TickEvent.ServerTickEvent event) {
+        if (event.phase != TickEvent.Phase.END || measuredTickStartedNanos == 0L) return;
+        if (measuredTickRun == queueIndex && scenario != null) {
+            simTickMetrics.record(simTick, System.nanoTime() - measuredTickStartedNanos);
+        }
+        measuredTickStartedNanos = 0L;
+        measuredTickRun = -1;
+    }
+
     @SubscribeEvent
     public static void onServerTick(TickEvent.ServerTickEvent event) {
         if (event.phase != TickEvent.Phase.END || phase != Phase.RUNNING) return;
@@ -232,7 +259,7 @@ public final class SimManager {
         }
     }
 
-    @SubscribeEvent
+    @SubscribeEvent(priority = EventPriority.LOWEST)
     public static void onServerCleanupTick(TickEvent.ServerTickEvent event) {
         if (event.phase != TickEvent.Phase.END || phase != Phase.CLEANUP) return;
         finishScenario();
@@ -283,11 +310,18 @@ public final class SimManager {
     private static void beginScenario() {
         scenario = queue.get(queueIndex);
         StevesArmyMod.LOGGER.info("[Sim] === scenario {}/{}: {} ===", queueIndex + 1, queue.size(), scenario.name);
+        // Chunks BEFORE the fixture builds: a fresh world (rm -rf run/world)
+        // loads its real chunks asynchronously, and a setBlockAndUpdate that
+        // lands before the load is silently replaced when the real chunk
+        // arrives (run 101100: recording showed zero terrain cells and the
+        // squad died pinned at spawn; run 102214: the slab landed after the
+        // spawns and suffocated the squad at 1 hp / 10 ticks).
+        forceChunks();
         terrain = new SimTerrain(level, new BlockPos(0, yLevel, 0), scenario.width, scenario.depth);
         scenario.terrainBuilder.accept(terrain);
         recorder = new SimRecorder(scenario.width, scenario.depth);
         recorder.captureTerrain(terrain);
-        forceChunks();
+        healMissingFixtureBlocks();
         // The session-start sweep misses actors leaked into unloaded chunks of
         // the saved world; now that this scenario's chunks are forced, sweep
         // again so a leaked soldier/anchor cannot join the live run.
@@ -305,6 +339,13 @@ public final class SimManager {
         // handler clears its per-entity state, which would silently undo any
         // disarmSoldier() the setup performed.
         SimGunHandler.setArmed(scenario.armed);
+        previousPerformanceMetricsEnabled = com.stevesarmy.debug.PerformanceMetrics.isEnabled();
+        if (scenario.name.startsWith("goto_performance")) {
+            com.stevesarmy.debug.PerformanceMetrics.setEnabled(true);
+            com.stevesarmy.debug.PerformanceMetrics.reset();
+        } else {
+            com.stevesarmy.debug.PerformanceMetrics.setEnabled(false);
+        }
         scenario.setup.accept(context);
         enemyHealthStart = totalEnemyHealth();
         sortedActions.clear();
@@ -312,6 +353,8 @@ public final class SimManager {
         sortedActions.sort(Comparator.comparingInt(SimScenario.ScheduledAction::tick));
         actionIndex = 0;
         simTick = 0;
+        simTickMetrics.reset();
+        performanceReport = "";
         // determinism aids: fixed daytime, no weather, no ambient mob spawns
         level.setDayTime(1000);
         level.setRainLevel(0.0f);
@@ -359,8 +402,18 @@ public final class SimManager {
                 slotOffset = Math.sqrt(dx * dx + dz * dz);
             }
             int anchorPulls = -1;
+            String moveSource = null;
+            String cautionReason = null;
+            Double appliedSpeed = null;
+            com.stevesarmy.entity.ai.SoldierSpeedController.Telemetry movementSpeed = null;
             if (soldier.getMoveControl() instanceof com.stevesarmy.entity.ai.CoverPositionController ctrl) {
                 anchorPulls = ctrl.getDebugAnchorPulls();
+                moveSource = ctrl.debugMoveSource();
+                cautionReason = ctrl.cautionReason();
+                movementSpeed = ctrl.getSpeedController().snapshot();
+                if (soldier.getSpeed() > 0.0f) {
+                    appliedSpeed = (double) soldier.getSpeed();
+                }
             }
             int exposedRays = -1;
             int exposedHeadRays = -1;
@@ -416,7 +469,8 @@ public final class SimManager {
                 clearingView == null ? -1 : clearingView.stage().ordinal(),
                 clearingView == null ? -1 : clearingView.checkedCount(),
                 clearingView != null && clearingView.secureAssemble(),
-                soldier.getCoverTacticalGoal().isClearingAdvancing()));
+                soldier.getCoverTacticalGoal().isClearingAdvancing(),
+                moveSource, cautionReason, appliedSpeed, movementSpeed));
             recorder.soldier(label, snap, los, nearestX, nearestZ,
                 shotCounts.getOrDefault(soldier.getUUID(), 0),
                 hasGun,
@@ -427,23 +481,19 @@ public final class SimManager {
                 soldier.isPreparingOrReloading(),
                 soldier.getPose().name(), soldier.isHalfCoverRising(),
                 snap.currentCover != null ? soldier.getSyncedCoverCurrentHeight() : -1f,
-                dangerAtSoldier, dangerLegExposed);
+                dangerAtSoldier, dangerLegExposed,
+                moveSource, cautionReason, appliedSpeed, movementSpeed,
+                GunIntegration.getAimProgress(soldier),
+                soldier.getCombatGoal() instanceof com.stevesarmy.entity.ai.SoldierCombatGoal combat
+                    ? combat.getAimQualityForDebug() : -1f,
+                soldier.getPeekController().getAlignedPreAimTicks());
         }
         recorder.endFrame(context.enemies);
     }
 
     /** Wrapper cover goals (MG, support) shell a real CoverTacticalGoal; unwrap for sampling. */
     private static CombatStateSnapshot captureFor(SoldierEntity soldier) {
-        if (soldier.getCoverTacticalGoal() instanceof CoverTacticalGoal goal) {
-            return goal.captureStateSnapshot();
-        }
-        if (soldier.getCoverTacticalGoal() instanceof com.stevesarmy.entity.ai.SupportCoverGoal supportGoal) {
-            return supportGoal.getCoverController().captureStateSnapshot();
-        }
-        if (soldier.getCoverTacticalGoal() instanceof com.stevesarmy.entity.ai.MachineGunnerSupportGoal mgGoal) {
-            return mgGoal.getCoverController().captureStateSnapshot();
-        }
-        return null;
+        return com.stevesarmy.debug.trace.SoldierTraceSampler.state(soldier);
     }
 
     private static EnemySoldierEntity nearestEnemy(SoldierEntity soldier, List<EnemySoldierEntity> enemies) {
@@ -469,9 +519,12 @@ public final class SimManager {
 
     private static void finishScenario() {
         float enemyHealthEnd = totalEnemyHealth();
+        if (scenario.name.startsWith("goto_performance")) {
+            performanceReport = com.stevesarmy.debug.PerformanceMetrics.report();
+        }
         SimRunResult result = new SimRunResult(scenario, scenario.durationTicks,
             GunIntegration.isAnyGunLoaded() && scenario.armed,
-            enemyHealthStart, enemyHealthEnd, timeline);
+            enemyHealthStart, enemyHealthEnd, timeline, simTickMetrics.snapshot(), performanceReport);
 
         // danger-map oracle: independent ground truth over the injected threats,
         // then the sampler-vs-oracle sweep the DangerOracleMismatch detector judges
@@ -590,6 +643,10 @@ public final class SimManager {
                     + " — baking overspent the shared per-tick budget"));
         }
 
+        if (scenario.name.startsWith("goto_performance")) {
+            StevesArmyMod.LOGGER.info("[Sim][GoToPerf] {}", result.tickMetrics.summary());
+            StevesArmyMod.LOGGER.info("[Sim][GoToPerf] instrumented metrics:\n{}", result.performanceReport);
+        }
         if (result.failed()) {
             if (scenario.expectedFailReason != null) tallyXfail++;
             else tallyFails.add(scenario.name);
@@ -620,6 +677,7 @@ public final class SimManager {
         terrain.clear();
         unforceChunks();
         SimIsolation.reset(level);
+        com.stevesarmy.debug.PerformanceMetrics.setEnabled(previousPerformanceMetricsEnabled);
         GunIntegration.shotListener = null;
         yLevel += Y_SEPARATION;
         queueIndex++;
@@ -654,7 +712,33 @@ public final class SimManager {
             for (int cz = chunkMinZ; cz <= chunkMaxZ; cz++) {
                 level.setChunkForced(cx, cz, true);
                 forcedChunks.add(new ChunkPos(cx, cz));
+                // setChunkForced only QUEUES the load — without this barrier
+                // the next line's writes can still race the chunk system on a
+                // fresh world. Blocking on FULL guarantees the real chunk
+                // exists before the fixture writes into it.
+                level.getChunk(cx, cz, net.minecraft.world.level.chunk.ChunkStatus.FULL, true);
             }
+        }
+    }
+
+    /**
+     * Re-places any fixture block the world dropped. The chunk barrier in
+     * forceChunks should make this a no-op; it exists so a residual placement
+     * failure surfaces as a healed fixture plus a loud log instead of a squad
+     * dying on a half-built slab.
+     */
+    private static void healMissingFixtureBlocks() {
+        if (terrain == null) return;
+        int healed = 0;
+        for (Map.Entry<BlockPos, net.minecraft.world.level.block.state.BlockState> entry
+            : terrain.placedStates().entrySet()) {
+            if (!level.getBlockState(entry.getKey()).equals(entry.getValue())) {
+                level.setBlockAndUpdate(entry.getKey(), entry.getValue());
+                healed++;
+            }
+        }
+        if (healed > 0) {
+            StevesArmyMod.LOGGER.warn("[Sim] healed {} fixture block(s) lost to the world-load race", healed);
         }
     }
 

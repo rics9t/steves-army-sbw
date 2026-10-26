@@ -6,7 +6,9 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Programmatic terrain fixture built from real blocks so the real VisibilityRay
@@ -20,12 +22,19 @@ public final class SimTerrain {
     public final int depth;
     private final ServerLevel level;
     private final List<BlockPos> placed = new ArrayList<>();
+    /** Placed block states by world position — the boot-race heal pass re-applies these. */
+    private final Map<BlockPos, BlockState> placedStates = new LinkedHashMap<>();
 
     public SimTerrain(ServerLevel level, BlockPos origin, int width, int depth) {
         this.level = level;
         this.origin = origin;
         this.width = width;
         this.depth = depth;
+    }
+
+    /** The level this fixture builds into (also used for map-color sampling). */
+    public ServerLevel level() {
+        return level;
     }
 
     /** Solid slab the scenario plays on, ringed by a 3-high rim so actors can't path off the edge. */
@@ -35,6 +44,15 @@ public final class SimTerrain {
         wall(-1, depth + 1, width + 1, depth + 1, 3, Blocks.STONE_BRICKS.defaultBlockState());
         wall(-1, -1, -1, depth + 1, 3, Blocks.STONE_BRICKS.defaultBlockState());
         wall(width + 1, -1, width + 1, depth + 1, 3, Blocks.STONE_BRICKS.defaultBlockState());
+    }
+
+    /**
+     * platform() floor without the containment border walls: for scenarios
+     * that must be genuinely coverless — any wall, including the border, is
+     * a cover candidate within search radius.
+     */
+    public void floorOnly() {
+        fill(origin.offset(-1, -1, -1), origin.offset(width + 1, -1, depth + 1), Blocks.SMOOTH_STONE.defaultBlockState());
     }
 
     /** Ground-level box wall: x1..x2 × z1..z2 footprint, h tall, hollow opening-free. */
@@ -201,6 +219,42 @@ public final class SimTerrain {
         wall(32, 16, 32, 19, 3, Blocks.STONE_BRICKS.defaultBlockState());
     }
 
+    /**
+     * Long-course egress fixture (~74-block span): house A (west) is
+     * partitioned into a front room (east) and a back room (west) with one
+     * interior door, so soldiers spawned deep must path through both doors
+     * to leave. A 50-block open street with scattered waist-high cover
+     * separates it from house B (east, single west door). Long enough that
+     * dock-window quantization reads as in-game minutes.
+     */
+    public void longStreetBlock() {
+        platform();
+        // House A MIRRORED: front room x7..10, back room x12..15, and the
+        // single door on the WEST wall's south half (6,21) — the squad exits
+        // away from the objective and must round the house to head east. The
+        // south offset matters: the defender's street nest sits on the z=18.5
+        // lane, and a door at z=18 would let his fire rake the whole interior
+        // through the west door and the partition gap (7 deaths in one run);
+        // at z=21 the lane terminates on the west wall and only the doorway
+        // itself stays exposed.
+        building(6, 12, 16, 24, 3, new int[][]{{6, 21}});
+        wall(11, 13, 11, 17, 3, Blocks.STONE_BRICKS.defaultBlockState());
+        wall(11, 19, 11, 23, 3, Blocks.STONE_BRICKS.defaultBlockState());
+        // House B: single west door; the order pings its center. The 1-high
+        // stub at x=73 gives the defender a dock-valid hold cell behind it —
+        // without adjacent cover his HOLD relocation wanders (street nests,
+        // doorway camps), and a door-camping guard makes the entrance a
+        // point-blank death funnel the egress asserts cannot pace against.
+        building(67, 12, 77, 24, 3, new int[][]{{67, 18}});
+        coverRow(73, 13, 73, 17, 1);
+        // Vertical cover lines (north-south walls) so the advance hops
+        // block-to-block sideways around them, like street-side walls.
+        coverRow(28, 12, 28, 17, 1);
+        coverRow(40, 18, 40, 23, 1);
+        coverRow(52, 12, 52, 17, 1);
+        coverRow(62, 18, 62, 23, 1);
+    }
+
     public void block(int x, int y, int z, BlockState state) {
         BlockPos pos = origin.offset(x, y, z);
         // The world silently rejects blocks above the build limit; surface that
@@ -212,6 +266,7 @@ public final class SimTerrain {
         }
         level.setBlockAndUpdate(pos, state);
         placed.add(pos);
+        placedStates.put(pos, state);
     }
 
     public void fill(BlockPos from, BlockPos to, BlockState state) {
@@ -231,11 +286,17 @@ public final class SimTerrain {
         return placed;
     }
 
+    /** Placed block states by world position (the boot-race heal pass re-applies these). */
+    public Map<BlockPos, BlockState> placedStates() {
+        return placedStates;
+    }
+
     /** Removes exactly the blocks this fixture placed. */
     public void clear() {
         for (BlockPos pos : placed) {
             level.removeBlock(pos, false);
         }
         placed.clear();
+        placedStates.clear();
     }
 }

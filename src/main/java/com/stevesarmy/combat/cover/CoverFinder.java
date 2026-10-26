@@ -660,7 +660,9 @@ public class CoverFinder {
     public boolean isPrimaryThreatProtected(CoverPoint coverPoint, LivingEntity soldier, Vec3 fallbackDirection) {
         CoverProtectionContext protection = resolveProtectionContext(soldier, fallbackDirection);
         Vec3 direction = protection.directionFrom(coverPoint.getPosition());
-        return direction == null || new CoverQualityEvaluator(level).isDirectionProtected(coverPoint, direction);
+        // Directional protection is an admission rule. Unknown or stale threat
+        // direction must never turn into an implicit pass for a cover claim.
+        return direction != null && new CoverQualityEvaluator(level).isDirectionProtected(coverPoint, direction);
     }
 
     /** Tests physical protection against an explicit threat direction. */
@@ -713,6 +715,20 @@ public class CoverFinder {
     }
 
     private float calculateObjectiveProgressScore(CoverPoint coverPoint, LivingEntity soldier, BlockPos attackTarget) {
+        // Path-based progression: when the soldier's attack goal holds an
+        // advance spine (the wide-lens route to the objective), progress is
+        // walked distance gained ALONG the route, not straight-line forward
+        // projection — the two disagree wherever a building forces the route
+        // away from the objective before rounding it.
+        if (soldier instanceof com.stevesarmy.entity.SoldierEntity se) {
+            com.stevesarmy.entity.ai.pathfinding.AdvanceSpine spine = se.getAttackSpine();
+            if (spine != null) {
+                double soldierProg = spine.progress(soldier.blockPosition());
+                double candProg = spine.progress(coverPoint.getPosition());
+                double maxProgress = DEFAULT_SEARCH_RADIUS * 2.0;
+                return (float) Math.max(0.0, Math.min(1.0, 0.5 + (candProg - soldierProg) / maxProgress));
+            }
+        }
         Vec3 soldierPos = soldier.position();
         Vec3 toObjective = new Vec3(
             attackTarget.getX() - soldierPos.x,

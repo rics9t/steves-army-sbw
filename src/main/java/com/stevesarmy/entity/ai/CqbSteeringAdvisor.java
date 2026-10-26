@@ -1,6 +1,7 @@
 package com.stevesarmy.entity.ai;
 
 import com.stevesarmy.StevesArmyMod;
+import com.stevesarmy.GameClock;
 import com.stevesarmy.combat.ThreatAwareness;
 import com.stevesarmy.combat.VisibilityRay;
 import com.stevesarmy.debug.DiagnosticLogManager;
@@ -19,12 +20,12 @@ import java.util.UUID;
 /**
  * Computes caution-steering state for a soldier following a path while a
  * hostile is known to be near that path. While caution is active the soldier
- * slows to a cautious pace and hugs the side of the path that keeps cover
+ * hugs the side of the path that keeps cover
  * between it and the enemy (continuous corner-pie, never stopping).
  *
- * The advisor never owns navigation; it only suggests a steer target, a speed
- * cap, and whether caution should be active at all. The move controller feeds
- * the suggestions into its normal steering.
+ * The advisor suggests a steer target and caution activation. Speed is resolved
+ * independently by SoldierSpeedController; automatic caution keeps the requested
+ * pace and manual CQB applies its deliberate cap there.
  */
 public class CqbSteeringAdvisor {
 
@@ -32,8 +33,7 @@ public class CqbSteeringAdvisor {
     private static final int CAUTION_DEBOUNCE_TICKS = 40;
     private static final int PATH_SAMPLE_NODE_COUNT = 8;
     private static final double LATERAL_OFFSET = 0.35;
-    private static final double CAUTION_SPEED_CAP = 0.24;
-    private static final double AUTO_CAUTION_SPEED_CAP = 0.37;
+    private static final long CAUTION_OBSERVATION_MAX_AGE_MS = 120L * 50L;
     private static final double BODY_SAMPLE_HEIGHT = 0.9;
     private static final double ENEMY_EYE_HEIGHT = 1.2;
     private static final String MANUAL_CQB_REASON = "manual CQB";
@@ -43,7 +43,6 @@ public class CqbSteeringAdvisor {
     private boolean cautionActive = false;
     private int lastCautionChangeTick = 0;
     private String cautionReason = NO_CAUTION_REASON;
-    private double currentSpeedFactor = 0.0;
 
     /** True while an enemy is within the caution radius of the remaining path. */
     public boolean isCautionActive(SoldierEntity soldier) {
@@ -74,9 +73,6 @@ public class CqbSteeringAdvisor {
         lastCautionChangeTick = soldier.tickCount;
         cautionReason = nextReason;
         logCautionTransition(soldier, nearest);
-        if (!cautionActive) {
-            currentSpeedFactor = 0.0;
-        }
         return cautionActive;
     }
 
@@ -94,7 +90,7 @@ public class CqbSteeringAdvisor {
 
     /**
      * Returns the adjusted waypoint for cautious steering, or null when the
-     * soldier should follow the path normally (just at the capped speed).
+     * soldier should follow the path normally.
      * When the current node is already protected from the enemy, the raw node
      * is returned; when it is exposed, the node is offset laterally toward the
      * side that keeps cover between the soldier and the enemy.
@@ -215,8 +211,10 @@ public class CqbSteeringAdvisor {
     }
 
     private boolean isSolidBeside(SoldierEntity soldier, Vec3 at) {
-        net.minecraft.core.BlockPos bp = net.minecraft.core.BlockPos.containing(
-            at.x, soldier.getY() + 0.6, at.z);
+        // Sample the future node's feet level. Sampling the follower's current Y
+        // makes a one-block cover row beneath a raised path look like doorway
+        // walls, even though the path is clear at the node's actual height.
+        net.minecraft.core.BlockPos bp = net.minecraft.core.BlockPos.containing(at.x, at.y, at.z);
         return !soldier.level().getBlockState(bp)
             .getCollisionShape(soldier.level(), bp).isEmpty();
     }
@@ -267,7 +265,7 @@ public class CqbSteeringAdvisor {
         }
         Vec3 enemy = null;
         double bestDistSq = Double.MAX_VALUE;
-        for (Vec3 candidate : collectEnemyPositionsStatic(soldier)) {
+        for (Vec3 candidate : collectEnemyPositions(soldier)) {
             double distSq = candidate.distanceToSqr(apex);
             if (distSq < bestDistSq) {
                 bestDistSq = distSq;
@@ -288,41 +286,29 @@ public class CqbSteeringAdvisor {
         return apex.add(watchDir.normalize().scale(4.0)).add(0.0, 1.2, 0.0);
     }
 
-    private static List<Vec3> collectEnemyPositionsStatic(SoldierEntity soldier) {
+    private static List<Vec3> collectEnemyPositions(SoldierEntity soldier) {
         List<Vec3> positions = new ArrayList<>();
         ThreatAwareness awareness = soldier.getThreatAwareness();
+        long nowMs = GameClock.nowMs();
         for (ThreatAwareness.ThreatInfo info : awareness.getThreatInfos()) {
-            positions.add(Vec3.atCenterOf(info.position));
+            if (info.wasObservedWithin(nowMs, CAUTION_OBSERVATION_MAX_AGE_MS)
+                && (info.entity == null || info.entity.isAlive())) {
+                positions.add(Vec3.atCenterOf(info.position));
+            }
         }
         UUID squadId = soldier.getSquadId();
         if (squadId != null && soldier.level() instanceof ServerLevel serverLevel) {
             SquadData squad = SquadManager.get(serverLevel).getSquadById(squadId).orElse(null);
             if (squad != null) {
                 for (SquadThreatIntel.ThreatKnowledge knowledge : squad.getThreatIntel().getAllThreats()) {
-                    if (knowledge.isAlive && knowledge.lastKnownPosition != null) {
+                    if (knowledge.isAlive && knowledge.lastKnownPosition != null
+                        && !squad.getThreatIntel().isThreatStale(knowledge.threatEntityId, serverLevel.getGameTime())) {
                         positions.add(Vec3.atCenterOf(knowledge.lastKnownPosition));
                     }
                 }
             }
         }
         return positions;
-    }
-
-    /**
-     * Manual CQB retains its original cautious pace. Automatic path caution
-     * keeps its lateral steering but travels at the normal sprint pace when
-     * the CQB toggle is off.
-     */
-    public double getCautionSpeed(SoldierEntity soldier, double requestedSpeed) {
-        if (!soldier.isCQB()) {
-            currentSpeedFactor = 0.0;
-            return Math.min(requestedSpeed, AUTO_CAUTION_SPEED_CAP);
-        }
-
-        // Ramp into the cap so entering CQB does not look like an abrupt sprint
-        // or an abrupt velocity override.
-        currentSpeedFactor = Math.min(CAUTION_SPEED_CAP, currentSpeedFactor + 0.02);
-        return Math.min(requestedSpeed, currentSpeedFactor);
     }
 
     private double nearestEnemyDistance(SoldierEntity soldier) {
@@ -364,24 +350,4 @@ public class CqbSteeringAdvisor {
         return samples;
     }
 
-    private List<Vec3> collectEnemyPositions(SoldierEntity soldier) {
-        List<Vec3> positions = new ArrayList<>();
-        ThreatAwareness awareness = soldier.getThreatAwareness();
-        for (ThreatAwareness.ThreatInfo info : awareness.getThreatInfos()) {
-            positions.add(Vec3.atCenterOf(info.position));
-        }
-
-        UUID squadId = soldier.getSquadId();
-        if (squadId != null && soldier.level() instanceof ServerLevel serverLevel) {
-            SquadData squad = SquadManager.get(serverLevel).getSquadById(squadId).orElse(null);
-            if (squad != null) {
-                for (SquadThreatIntel.ThreatKnowledge knowledge : squad.getThreatIntel().getAllThreats()) {
-                    if (knowledge.isAlive && knowledge.lastKnownPosition != null) {
-                        positions.add(Vec3.atCenterOf(knowledge.lastKnownPosition));
-                    }
-                }
-            }
-        }
-        return positions;
-    }
 }

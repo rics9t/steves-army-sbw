@@ -83,8 +83,9 @@ public final class SimRecordingWriter {
                    <td><span class="dot" style="background:transparent;border:2px solid rgba(255,60,60,.9)"></span></td><td>suppression arc</td></tr>
                <tr><td><span style="color:#0ff">&mdash;</span></td><td>cover target</td>
                    <td><span style="color:#fff">&mdash;</span></td><td>line of sight</td></tr>
-               <tr><td><span class="sq" style="background:#9c8a4d"></span></td><td>half cover</td>
-                   <td><span class="sq" style="background:#cfd8e6"></span></td><td>full cover</td></tr>
+               <tr><td><span class="sq" style="background:#9c8a4d"></span></td><td>target: half cover</td>
+                   <td><span class="sq" style="background:#cfd8e6"></span></td><td>target: full cover</td></tr>
+               <tr><td colspan="4" style="color:#888">terrain = vanilla map colors, +z relief shading</td></tr>
                <tr><td><span style="color:#ffe066">&mdash;</span></td><td>shot (dot = impact)</td>
                    <td><span style="display:inline-block;width:14px;height:14px;background:rgba(255,60,40,.35)"></span></td><td>danger (baked map)</td></tr>
                <tr><td><span style="display:inline-block;width:14px;height:14px;background:#4dff88;border-radius:50%"></span></td><td>standing</td>
@@ -113,6 +114,9 @@ public final class SimRecordingWriter {
             terr.width = cv.width; terr.height = cv.height;
             {
               const tc = terr.getContext('2d');
+              // Legacy height-coded terrain keeps cover blocks visually distinct in
+              // the simulation animation. Recording/export viewers retain their
+              // separate vanilla-map renderer.
               const rimShades = ['#242424', '#808080', '#a2a2a2', '#c6c6c6'];
               const HALF = '#9c8a4d', FULL = '#cfd8e6';
               for (let ix = 0; ix < W; ix++) for (let iz = 0; iz < H; iz++) {
@@ -244,6 +248,8 @@ public final class SimRecordingWriter {
               return 'label            : ' + s.l +
                    '\\ncoverState       : ' + s.cs +
                    '\\npeekState        : ' + s.ps +
+                   '\\nADS / aim quality: ' + (s.ads === undefined ? '-' : Math.round(s.ads * 100) + '% / ' + s.aq.toFixed(3)) +
+                   '\\naligned pre-ADS  : ' + (s.pat || 0) + ' ticks' +
                    (s.po !== undefined || s.ch !== undefined
                      ? '\\nposture          : ' + (s.po || 'STANDING') + (s.ri ? '  [RISING]' : '')
                        + (s.ch !== undefined ? '   cover height: ' + s.ch : '')
@@ -258,6 +264,10 @@ public final class SimRecordingWriter {
                    '\\ntargetCover      : ' + (s.tx !== undefined ? p(s.tx) + ', ' + p(s.tz) + (s.tk ? '  [' + s.tk + ']' : '') : '-') +
                    '\\nrelocCenter      : ' + (s.rx !== undefined ? p(s.rx) + ', ' + p(s.rz) : '-') +
                    '\\nlast search      : ' + (s.ls || '-') +
+                   (s.speedRequest !== undefined ? '\\nspeed request    : ' + s.speedRequest.toFixed(3)
+                     + '\\ntarget / applied : ' + s.speedTarget.toFixed(3) + ' / ' + s.speedApplied.toFixed(3)
+                     + '\\nmoved last tick  : ' + s.movedPerTick.toFixed(4)
+                     + '\\nspeed limit      : ' + s.speedLimit : '') +
                    '\\nshots fired      : ' + (s.sf || 0) +
                    (s.am !== undefined ? '\\nammo             : ' + s.am + ' / ' + s.mg : '') +
                    '\\nslot offset      : ' + (s.cd !== undefined ? s.cd.toFixed(2) + (s.cd > 0.35 ? '  [DRIFT]' : '') : '-') +

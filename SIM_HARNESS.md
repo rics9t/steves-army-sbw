@@ -105,6 +105,63 @@ on the 20 TPS baseline with varying reasons). Verdict-level A/B on stable
 scenarios matches exactly. If a fast-run-only signal looks async-related,
 rerun that scenario with `-Psim.fastticks=false` before chasing it.
 
+### GO_TO arrival timing
+
+`goto_cover_endpoint_completion` and `goto_cross_cover_center_keeps_claim` put
+static cover in the destination search area before issuing GO_TO. The selected
+dock completes the command even outside the ping centre radius. The probes
+check that a route crossing the centre keeps its cover approach, that arrival
+clears relocation ownership, and that the completed order retains the dock
+through the ordinary HOLD march dwell. Run both with fast ticks and
+`-Psim.fastticks=false`.
+
+`goto_arrival_cover_delay` forces an initial cover relocation failure, then adds
+reachable half cover when the direct walk reaches its objective, with a known
+enemy 30 blocks beyond it. It checks search initiation within 20 ticks, selection
+within 60 ticks, physical docking within 100 ticks, and preservation of the
+completed GO_TO holding state. `[SimGoToArrival]` logs the measured ticks and the
+arrival cooldown. Confirm timing with `-Psim.fastticks=false` as well as fast ticks.
+
+### Crowded ATTACK traversal probes
+
+The full-only scenarios `crowded_attack_rows`, `crowded_attack_tall_rows`,
+`attack_reping_low_cover_12v12`, and `attack_reping_moved_chokepoints_12v12`
+exercise 12 friendly riflemen and 12 defenders with successive cover rows,
+reissued objectives, or moved objectives. Run them together with:
+
+```powershell
+.\gradlew runServer -Psim.autorun=true -Psim.scenario=crowded_attack_rows,crowded_attack_tall_rows,attack_reping_low_cover_12v12,attack_reping_moved_chokepoints_12v12
+```
+
+`TraversalSpeedProbe` independently measures physical displacement every server
+tick, including collisions and rescue teleports; its first tick establishes the
+spawn baseline. `[SimTraversalSpeed]` log lines summarize the distribution and
+largest movements with height changes, velocity, movement owner, cover/peek
+state, movement attributes, and controller intent. Intent is not measured
+blocks per tick. Investigation thresholds are >=1 horizontal block in one tick,
+or >=0.60 blocks per tick for three consecutive ticks. These are candidate
+signatures, not proof of a controller fault; jumps, shoves, and rescue teleports
+remain in the evidence. Progress/combat assertions guard against vacant probes.
+
+The gun handler uses the Test instance's default-pack M4A1 movement profile
+(weight 3.5, aim -0.15, reload -0.10). Firing still uses the harness's hitscan gun
+model, not the actual M4A1 implementation or its 810 RPM cadence. Confirm any
+fast-run signal with `-Psim.fastticks=false` before drawing timing conclusions.
+
+### Machine-gunner ATTACK continuity
+
+`mg_advance_continuity` advances an MG and rifleman through half-cover rows
+five blocks apart with distant stationary enemies. It checks physical docking,
+successor-cover ownership when leaving a dock, and unexplained exposed pauses;
+peek excursions and completed orders do not count as departures.
+
+`mg_stale_claim_endpoint` first waits for a real MG dock, then reconstructs the
+trace's endpoint state: navigation stopped away from that dock, `NO_COVER`, a
+retained origin claim, and recent sub-threshold suppression. It checks recovery
+within 20 ticks and release of the remote claim. The relocation is an explicit
+fault-state injection, not a claim of deterministic replay of the original trace.
+Run both with fast ticks and `-Psim.fastticks=false`.
+
 ### Watching the simulation
 
 Every scenario also produces `<scenario>_<timestamp>_sim.html` — a
@@ -112,8 +169,9 @@ self-contained top-down animation of the run (double-click to open in any
 browser; no server or codec needed). Soldiers are colored by cover state with a
 white ring when pinned and a red arc showing suppression level; dashed white
 lines are live line-of-sight, cyan lines point at the pursued cover (marker
-colored by cover type), tan blocks are half cover and pale steel blocks are
-full cover, yellow lines are shots fired with an impact dot at the aim point,
+colored by cover type), terrain is painted with vanilla map colors plus the
+vanilla +z relief shading (so walls read as elevation edges, not color hints),
+yellow lines are shots fired with an impact dot at the aim point,
 red squares are enemies. The event feed below the scrubber is append-only.
 Play at 0.5–10x, scrub, and click a soldier for its full state snapshot at
 that tick (including shots fired, magazine, and the `last search` line —
@@ -435,6 +493,24 @@ Recording: frames now carry `yh` (head yaw) for aim-orientation assertions.
 | `cqb_lost_contact_watch` | Armed enemy slips behind the house wall: soldier holds position and keeps west-facing aim through the watch window |
 
 ## Detectors (all run in every scenario)
+
+`movement_speed_transitions` is a core real-controller probe for stale crawl
+compensation after ADS release, preservation of raw navigation requests, bounded
+docking with sideways momentum, preservation of unanchored external impulses,
+ordinary acceleration/steady pace, immediate idle stop, pinned escape dash and
+firing-prone priority. Baseline reproduces the first two speed-burst mechanisms.
+Recording inspect panels expose speed request, target/applied intent, limiting
+reason and measured last-tick displacement; these values are also in recording JSON.
+
+`caution_freshness_and_pace` is a core server-level input/controller probe with AI
+disabled so observations cannot renew accidentally. It checks fresh and expired
+position pings, squad intel and retained living references; corner-watch freshness;
+automatic steering and fallback at requested pace under an attribute tax; requested
+slow movement; manual CQB's ramp/cap; and restoration after a fallback clamp.
+`caution_ads_travel_floor` now guards normal GO_TO pace (about 0.398 b/t with
+weapon weight), replacing its historical assertion for the retired automatic cap.
+Use `suppressed_crawl_pace` and `cover_approach_crawl` for end-to-end crawl checks,
+and `cqb_doorway_queue` / `cqb_corner_pie` for manual CQB flow.
 
 StuckSeek, SeekFailLoop, CoverOscillation, PeekThrash (incl. aborted
 peek cycles), SuppressionStarve, FollowEscapeBlocked, PathFailStorm,

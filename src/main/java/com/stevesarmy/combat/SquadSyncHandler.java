@@ -13,6 +13,7 @@ import com.stevesarmy.squad.OwnedSoldierRegistry;
 import com.stevesarmy.squad.SquadActivityManager;
 import com.stevesarmy.entity.SoldierEntity;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
@@ -120,6 +121,31 @@ public class SquadSyncHandler {
         com.stevesarmy.squad.FireTeamSuppressionTracker.tick(event.getServer());
         com.stevesarmy.squad.SquadMovementCoordinator.tick(event.getServer());
 
+        // Drive each squad's danger map once per level tick. SoldierEntity used
+        // to perform a manager lookup from every member tick before the map's
+        // own game-time de-duplication could run.
+        for (ServerLevel level : event.getServer().getAllLevels()) {
+            var manager = com.stevesarmy.squad.SquadManager.get(level);
+            for (var squad : manager.getAllSquads()) {
+                SoldierEntity anchor = null;
+                var leader = level.getEntity(squad.getLeaderId());
+                if (leader instanceof SoldierEntity soldier && soldier.isAlive() && !soldier.isRemoved()) {
+                    anchor = soldier;
+                } else {
+                    for (UUID memberId : squad.getMemberIds()) {
+                        var entity = level.getEntity(memberId);
+                        if (entity instanceof SoldierEntity soldier && soldier.isAlive() && !soldier.isRemoved()) {
+                            anchor = soldier;
+                            break;
+                        }
+                    }
+                }
+                if (anchor != null) {
+                    squad.tickDangerMap(level, level.getGameTime(), anchor.position());
+                }
+            }
+        }
+
         tickCounter++;
         if (tickCounter >= 20) {
             tickCounter = 0;
@@ -128,6 +154,14 @@ public class SquadSyncHandler {
             registry.pruneGoneEntries(event.getServer());
 
             for (net.minecraft.server.level.ServerLevel level : event.getServer().getAllLevels()) {
+                var manager = com.stevesarmy.squad.SquadManager.get(level);
+                boolean intelExpired = false;
+                for (var squad : manager.getAllSquads()) {
+                    int before = squad.getThreatIntel().getThreatCount();
+                    squad.tickIntelCleanup(level.getGameTime());
+                    intelExpired |= squad.getThreatIntel().getThreatCount() != before;
+                }
+                if (intelExpired) manager.setDirty();
                 for (var entity : level.getEntities().getAll()) {
                     if (entity instanceof SoldierEntity soldier && !soldier.level().isClientSide) {
                         if (soldier.isAlive() && !soldier.isRemoved()) {

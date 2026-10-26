@@ -6,6 +6,8 @@ public class StevesArmyConfig {
     
     public static final ForgeConfigSpec.Builder BUILDER = new ForgeConfigSpec.Builder();
     public static final ForgeConfigSpec SPEC;
+    public static final ForgeConfigSpec.BooleanValue SOLDIER_CHUNK_LOADING_ENABLED;
+    public static final ForgeConfigSpec.IntValue SOLDIER_CHUNK_LOADING_DISTANCE;
     
     public static final ForgeConfigSpec.DoubleValue AIM_QUALITY_BASE_ACCURACY;
     public static final ForgeConfigSpec.DoubleValue AIM_QUALITY_THRESHOLD_SCALE;
@@ -105,6 +107,9 @@ public class StevesArmyConfig {
     public static final ForgeConfigSpec.IntValue ATTACK_CLEAR_RAY_BUDGET;
     public static final ForgeConfigSpec.IntValue ATTACK_CLEAR_SETTLE_TICKS;
     public static final ForgeConfigSpec.IntValue ATTACK_CLEAR_STALL_TICKS;
+    public static final ForgeConfigSpec.BooleanValue ATTACK_CLEAR_DIRECT_EGRESS;
+    public static final ForgeConfigSpec.BooleanValue ATTACK_PATH_SPINE_ENABLED;
+    public static final ForgeConfigSpec.IntValue ATTACK_SPINE_FLOW_DWELL_MS;
     public static final ForgeConfigSpec.DoubleValue CLOSE_COMBAT_SEEK_RADIUS;
     public static final ForgeConfigSpec.IntValue CLOSE_COMBAT_REEVAL_INTERVAL_TICKS;
 
@@ -184,6 +189,7 @@ public class StevesArmyConfig {
     public static final ForgeConfigSpec.IntValue ASYNC_PATHFINDING_MAX_PENDING_TICKS;
     public static final ForgeConfigSpec.IntValue EXACT_PATH_VALIDATION_LIMIT;
     public static final ForgeConfigSpec.IntValue COVER_SEARCH_FAILURE_RETRY_TICKS;
+    public static final ForgeConfigSpec.IntValue GO_TO_SEEK_GRACE_TICKS;
     public static final ForgeConfigSpec.IntValue COVER_SCORING_MAX_CONTACTS;
     public static final ForgeConfigSpec.IntValue MOVE_GOAL_REPATH_TICKS;
 
@@ -204,11 +210,23 @@ public class StevesArmyConfig {
     public static final ForgeConfigSpec.DoubleValue COVER_SOFT_FACTOR;
     public static final ForgeConfigSpec.IntValue COVER_WAIT_TIMEOUT_TICKS;
     public static final ForgeConfigSpec.BooleanValue FIRETEAM_HEAVY_HOLD_REPOSITION;
+    public static final ForgeConfigSpec.BooleanValue SUPPRESSED_RELOCATION_SAFE_ROUTE;
     public static final ForgeConfigSpec.DoubleValue GROUP_COHESION_BAND_BLOCKS;
     public static final ForgeConfigSpec.DoubleValue GROUP_AHEAD_DWELL_MULT;
     public static final ForgeConfigSpec.DoubleValue GROUP_BEHIND_DWELL_MULT;
 
     static {
+        BUILDER.push("soldier_chunk_loading");
+        SOLDIER_CHUNK_LOADING_ENABLED = BUILDER
+            .comment("Keep a small entity-ticking area around loaded soldiers near a non-spectator player. May increase server load.",
+                "Applies to friendly and enemy soldiers. Does not search unloaded chunks for soldiers.")
+            .define("enabled", false);
+        SOLDIER_CHUNK_LOADING_DISTANCE = BUILDER
+            .comment("Maximum horizontal distance in blocks from any non-spectator player in the same dimension.",
+                "This is a total distance, not an addition to simulation distance. Normal simulation still applies outside it.",
+                "Each qualifying soldier keeps a 3x3 entity-ticking area plus Minecraft's supporting chunk border loaded.")
+            .defineInRange("distance", 256, 16, 1024);
+        BUILDER.pop();
         BUILDER.push("aim_quality");
         
         AIM_QUALITY_BASE_ACCURACY = BUILDER
@@ -257,8 +275,8 @@ public class StevesArmyConfig {
             .defineInRange("moveDecayRate", 0.02, 0.0, 0.1);
         
         AIM_QUALITY_TARGET_MOVE_PENALTY = BUILDER
-            .comment("Additional per-tick aimQuality decay when the target is moving.",
-                     "Makes it harder to track sprinting targets. Default: 0.05.")
+            .comment("Tracking aim penalty when the target is moving, scaled by the effective aim build rate each tick.",
+                     "Lowers settled tracking quality without overwhelming slow aim acquisition. Default: 0.05.")
             .defineInRange("targetMovePenalty", 0.05, 0.0, 0.2);
         
         AIM_QUALITY_SWITCH_RESET = BUILDER
@@ -739,8 +757,8 @@ BUILDER.pop();
             .defineInRange("attackClearRayBudget", 24, 0, 128);
 
         ATTACK_CLEAR_SETTLE_TICKS = BUILDER
-            .comment("Once the area is reached, checked, and free of unresolved threats, the squad",
-                     "must stay settled this long before the order completes as Area secured.",
+            .comment("Deprecated compatibility setting; ignored. Attack orders complete immediately",
+                     "once the area is reached, checked, and free of unresolved threats.",
                      "Default: 80 ticks (4 s)")
             .defineInRange("attackClearSettleTicks", 80, 20, 400);
 
@@ -749,6 +767,31 @@ BUILDER.pop();
                      "long marks the attack STALLED (reported once; the order persists).",
                      "Default: 600 ticks (30 s)")
             .defineInRange("attackClearStallTicks", 600, 100, 2400);
+
+        ATTACK_CLEAR_DIRECT_EGRESS = BUILDER
+            .comment("Direct egress for approach-stage soldiers: a check job beyond the investigate",
+                     "band (or no in-band job at all) is walked as one full route to the target -",
+                     "partial paths taken - instead of being dock-hopped. Fixes soldiers parking at",
+                     "a dock mid-route or drifting backwards when the exit faces away from the",
+                     "objective. false restores dock-hop-only advances.",
+                     "Default: true")
+            .define("attackClearDirectEgress", true);
+
+        ATTACK_PATH_SPINE_ENABLED = BUILDER
+            .comment("Path-based attack progression (advance spine): route the soldier to the attack",
+                     "ping once with the wide-lens pathfinder, then measure cover progression along",
+                     "that route instead of straight-line distance. Covers that advance the route win;",
+                     "interior covers that do not are rejected, so soldiers exit buildings by the door",
+                     "and dock on street cover en route. false restores straight-line progression.",
+                     "Default: true")
+            .define("attackPathSpineEnabled", true);
+
+        ATTACK_SPINE_FLOW_DWELL_MS = BUILDER
+            .comment("Cover dwell (ms) during a spine advance with NO live contact: the soldier",
+                     "docks, glances, and keeps hopping. Under contact the legacy dwell (4000 ms",
+                     "baseline, suppression-scaled) applies unchanged.",
+                     "Default: 600 ms")
+            .defineInRange("attackSpineFlowDwellMs", 600, 200, 2000);
 
         BUILDER.pop();
 
@@ -1154,8 +1197,8 @@ BUILDER.pop();
                 entry -> entry instanceof String);
 
         SOLDIER_DEATH_DROPS = BUILDER
-            .comment("Soldiers drop their whole inventory inside one supply pouch",
-                     "where they die instead of vanishing with it. Default: true.")
+            .comment("Soldiers drop guns and one carried ammo stack per gun ammo type loose",
+                     "where they die, with remaining inventory in a supply pouch. Default: true.")
             .define("soldierDeathDrops", true);
 
         SWAP_SYNCS_HEALTH = BUILDER
@@ -1282,6 +1325,13 @@ BUILDER.pop();
                      "Default: 20")
             .defineInRange("coverSearchFailureRetryTicks", 20, 1, 200);
 
+        GO_TO_SEEK_GRACE_TICKS = BUILDER
+            .comment("Ticks a GO_TO ping move may hunt for a cover route before handing the",
+                     "walk to direct navigation. The counter is keyed on the destination, not",
+                     "the ping generation, so repeated re-pings to the same spot cannot keep",
+                     "restarting the hunt (the mashed-ping strand). Default: 60")
+            .defineInRange("goToSeekGraceTicks", 60, 10, 400);
+
         COVER_SCORING_MAX_CONTACTS = BUILDER
             .comment("Maximum squad firing contacts traced per cover candidate while scoring cover.",
                      "Contacts beyond the cap are skipped for scoring only; targeting and peek",
@@ -1388,6 +1438,17 @@ BUILDER.pop();
                      "routine reposition requests pending until the team drops below HEAVY.",
                      "Default: true")
             .define("fireteamHeavyHoldReposition", true);
+
+        SUPPRESSED_RELOCATION_SAFE_ROUTE = BUILDER
+            .comment("Suppressed relocation is fully safe or does not happen: every",
+                     "autonomous suppressed reposition must route through the safe-route",
+                     "classifier (PROTECTED / forced-crawl CRAWL_SAFE accepted, EXPOSED",
+                     "withheld so the soldier stays at his current cover). Applies to",
+                     "attack-target soldiers too, whose searches previously skipped the",
+                     "classifier entirely. Disable to restore the legacy behavior where",
+                     "only non-attack soldiers classified their relocation routes.",
+                     "Default: true")
+            .define("suppressedRelocationSafeRoute", true);
 
         GROUP_COHESION_BAND_BLOCKS = BUILDER
             .comment("Distance band (blocks) beyond the fireteam centroid that counts as",
@@ -1761,6 +1822,18 @@ BUILDER.pop();
         return ATTACK_CLEAR_STALL_TICKS.get();
     }
 
+    public static boolean isAttackClearDirectEgress() {
+        return ATTACK_CLEAR_DIRECT_EGRESS.get();
+    }
+
+    public static boolean isAttackPathSpineEnabled() {
+        return ATTACK_PATH_SPINE_ENABLED.get();
+    }
+
+    public static long getAttackSpineFlowDwellMs() {
+        return ATTACK_SPINE_FLOW_DWELL_MS.get();
+    }
+
     public static double getCloseCombatSeekRadius() {
         return CLOSE_COMBAT_SEEK_RADIUS.get();
     }
@@ -1922,6 +1995,10 @@ BUILDER.pop();
         return COVER_SEARCH_FAILURE_RETRY_TICKS.get();
     }
 
+    public static int getGoToSeekGraceTicks() {
+        return GO_TO_SEEK_GRACE_TICKS.get();
+    }
+
     public static int getMoveGoalRepathTicks() {
         return MOVE_GOAL_REPATH_TICKS.get();
     }
@@ -1988,6 +2065,10 @@ BUILDER.pop();
 
     public static boolean isFireteamHeavyHoldReposition() {
         return FIRETEAM_HEAVY_HOLD_REPOSITION.get();
+    }
+
+    public static boolean isSuppressedRelocationSafeRoute() {
+        return SUPPRESSED_RELOCATION_SAFE_ROUTE.get();
     }
 
     public static float getGroupCohesionBandBlocks() {
