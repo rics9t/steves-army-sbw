@@ -2,7 +2,6 @@ package com.stevesarmy.compat.sbw;
 
 import com.stevesarmy.StevesArmyMod;
 import com.stevesarmy.entity.SoldierEntity;
-import com.stevesarmy.vehicle.VehicleBoardingManager;
 import com.stevesarmy.vehicle.VehicleDriverRegistry;
 import com.stevesarmy.vehicle.VehicleMountPolicy;
 import net.minecraft.world.entity.Entity;
@@ -72,8 +71,6 @@ public final class SbwCompat {
                     VehicleMountPolicy.enforceCrewDriverSeat(soldier, vehicle);
                 }
             }
-        } else {
-            VehicleBoardingManager.autoBoardOrConvoy(soldier);
         }
     }
 }
