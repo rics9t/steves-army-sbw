@@ -63,6 +63,10 @@ public class IncomingFireHandler {
     @SubscribeEvent
     public static void onEntityJoin(EntityJoinLevelEvent event) {
         Entity entity = event.getEntity();
+        // This subscriber runs on both the client and integrated-server threads.
+        // These maps are consumed by the server tick, so client projectile joins
+        // must never mutate them concurrently.
+        if (entity.level().isClientSide) return;
         // TaCZ guard first: resolving EntityKineticBullet.TYPE without TaCZ installed would NCDFE.
         if (com.stevesarmy.combat.GunIntegration.isTaczLoaded() && entity.getType() == EntityKineticBullet.TYPE) {
             trackedBullets.put(entity, null);
@@ -346,6 +350,7 @@ public class IncomingFireHandler {
     }
 
     public static void onCbcProjectileSpawn(Entity entity) {
+        if (entity == null || entity.level().isClientSide) return;
         if (isCbcLoaded() && isCbcProjectile(entity)) {
             trackedCbcProjectiles.put(entity, null);
         }

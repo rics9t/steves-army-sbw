@@ -4,6 +4,7 @@ import com.stevesarmy.StevesArmyMod;
 import com.stevesarmy.entity.SoldierEntity;
 import com.stevesarmy.vehicle.VehicleBoardingManager;
 import com.stevesarmy.vehicle.VehicleDriverRegistry;
+import com.stevesarmy.vehicle.VehicleMountPolicy;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.item.ItemStack;
 import net.minecraftforge.common.MinecraftForge;
@@ -65,7 +66,11 @@ public final class SbwCompat {
         Entity vehicle = soldier.getVehicle();
         if (isVehicle(vehicle)) {
             if (SbwVehicles.isDriver(vehicle, soldier)) {
-                VehicleDriverRegistry.onBoarded(soldier, vehicle);
+                if (soldier.getRole() == com.stevesarmy.entity.SoldierRole.VEHICLE_CREW) {
+                    VehicleDriverRegistry.onBoarded(soldier, vehicle);
+                } else {
+                    VehicleMountPolicy.enforceCrewDriverSeat(soldier, vehicle);
+                }
             }
         } else {
             VehicleBoardingManager.autoBoardOrConvoy(soldier);

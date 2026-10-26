@@ -53,13 +53,16 @@ public final class VehicleMountPolicy {
         if (!SbwCompat.isVehicle(vehicle) || SbwVehicles.isDrone(vehicle)) return false;
         if (SbwVehicles.isWrecked(vehicle)) return false;
         if (soldier.isPassenger()) return false;
-        return SbwVehicles.hasFreeSeat(vehicle);
+        if (!SbwVehicles.hasFreeSeat(vehicle)) return false;
+        return soldier.getRole() == SoldierRole.VEHICLE_CREW
+            || com.stevesarmy.compat.SbwCompat.firstFreePassengerSeat(vehicle) >= 1;
     }
 
     public static boolean board(SoldierEntity soldier, Entity vehicle) {
         if (!canBoard(soldier, vehicle)) return false;
-        authorize(soldier, vehicle);
-        boolean ok = soldier.startRiding(vehicle, true);
+        boolean preferGunnerSeat = soldier.getRole() != SoldierRole.VEHICLE_CREW
+            || com.stevesarmy.compat.SbwCompat.passengerInSeat(vehicle, 0) != null;
+        boolean ok = VS2Compat.seatSoldierOnEntity(soldier, vehicle, preferGunnerSeat);
         if (!ok) {
             revoke(soldier);
         } else if (soldier.getRole() != SoldierRole.VEHICLE_CREW) {
@@ -68,5 +71,27 @@ public final class VehicleMountPolicy {
             soldier.setTarget(null);
         }
         return ok;
+    }
+
+    /** Re-seat legacy passengers away from the driver position after upgrading. */
+    public static boolean enforceCrewDriverSeat(SoldierEntity soldier, Entity vehicle) {
+        if (soldier == null || vehicle == null || soldier.getRole() == SoldierRole.VEHICLE_CREW
+            || !SbwVehicles.isDriver(vehicle, soldier)) {
+            return true;
+        }
+
+        int passengerSeat = com.stevesarmy.compat.SbwCompat.firstFreePassengerSeat(vehicle);
+        if (passengerSeat >= 1
+            && com.stevesarmy.compat.SbwCompat.changeSeat(vehicle, soldier, passengerSeat)
+            && com.stevesarmy.compat.SbwCompat.seatIndexOf(vehicle, soldier) == passengerSeat) {
+            soldier.setTarget(null);
+            return true;
+        }
+
+        // No passenger seat is available: release this non-crew rider instead of
+        // leaving it in the driver's seat or letting it steer the vehicle.
+        VS2Compat.releaseTransport(soldier, false);
+        soldier.setTarget(null);
+        return false;
     }
 }

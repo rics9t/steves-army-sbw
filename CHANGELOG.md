@@ -6,6 +6,12 @@ All notable changes to Steve's Army will be documented in this file.
 
 ### Changed
 
+- **Superb Warfare support:** SBW firearms now use the SBW gun handler. Dedicated
+  vehicle crew take the driver seat and follow GO_TO, ATTACK, FOLLOW, and HOLD
+  orders from the vehicle wheel, while regular squad orders continue to ignore crew.
+  Ordinary infantry use passenger seats as taxi riders. Drivers keep space from
+  follow targets, stop close to move pings, and brake for friendly soldiers and
+  allied vehicles; anti-tank soldiers continue to target hostile-crewed vehicles.
 - Combat positioning rework.
   - Close-range fights no longer freeze soldiers on sight: the engagement hold only
     latches inside an emergency range (5 blocks; 3 in CQB formation) with a loaded gun,
@@ -123,9 +129,8 @@ All notable changes to Steve's Army will be documented in this file.
   pistol in the sidearm slot), check their inventory, and equip a gun from the
   backpack when the main hand is empty.
 - **Superb Warfare compat** (optional, `superbwarfare.enabled`): anti-tank soldiers
-  treat enemy-crewed Superb Warfare vehicles as hard targets, and vehicle crew can
-  board and man their guns (gunnery only — SBW vehicles are client-input driven, so
-  AI cannot drive them).
+  treat hostile-crewed vehicles as hard targets, dedicated crew can drive and man
+  SBW vehicles, and infantry use them as passenger transports.
 
 ### Changed
 

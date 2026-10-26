@@ -154,8 +154,9 @@ public final class CrewAssignment {
     /**
      * Seats crew on a plain world-space vehicle entity (Superb Warfare), the
      * entity analogue of {@link #mountCrewOnShip}: capacity is the vehicle's JSON
-     * seat count, each soldier rides via {@link VS2Compat#seatSoldierOnEntity}
-     * (gunner seats filled before the driver seat). No handle/contraption tiers —
+     * seat count, the first crew member takes the driver seat when it is free,
+     * and the remaining crew fill passenger weapon stations. Each soldier rides
+     * via {@link VS2Compat#seatSoldierOnEntity}. No handle/contraption tiers —
      * an SBW vehicle has exactly one seating system.
      *
      * @return the number of crew seated
@@ -172,7 +173,8 @@ public final class CrewAssignment {
                 break;
             }
             prepareForMount(soldier);
-            if (VS2Compat.seatSoldierOnEntity(soldier, vehicle, true)) {
+            boolean preferGunnerSeat = SbwCompat.passengerInSeat(vehicle, 0) != null;
+            if (VS2Compat.seatSoldierOnEntity(soldier, vehicle, preferGunnerSeat)) {
                 seatedCount++;
             }
         }

@@ -156,7 +156,7 @@ public final class VehicleBoardingManager {
         if (!VehicleMountPolicy.board(soldier, vehicle)) return false;
         VehicleDriverRegistry.onBoarded(soldier, vehicle);
         if (wasEmpty) {
-            StevesArmyMod.LOGGER.info("[SBW] soldier {} took driver seat of {}",
+            StevesArmyMod.LOGGER.info("[SBW] soldier {} boarded empty vehicle {}",
                 soldier.getId(), vehicle.getName().getString());
         }
         return true;

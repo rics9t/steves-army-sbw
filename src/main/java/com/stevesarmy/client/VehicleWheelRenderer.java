@@ -7,7 +7,9 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.network.chat.Component;
 
-/** Radial wheel for vehicle orders: Mount (upper right), Dismount (bottom), Mount Crew (upper left). */
+import java.util.List;
+
+/** Radial wheels for vehicle transport and vehicle-control orders. */
 public class VehicleWheelRenderer {
     private static final int INNER_RADIUS = 30;
     private static final int OUTER_RADIUS = 80;
@@ -27,18 +29,19 @@ public class VehicleWheelRenderer {
         int centerY = screenHeight / 2;
 
         TransportOrder hoveredAction = VehicleWheelHandler.getHoveredAction();
+        List<TransportOrder> actions = VehicleWheelHandler.actionsForCurrentPage();
 
         RenderSystem.enableBlend();
         RenderSystem.defaultBlendFunc();
         RenderSystem.disableDepthTest();
 
-        int count = TransportOrder.values().length;
+        int count = actions.size();
         int sectorSize = 360 / count;
 
         drawSectorSeparators(guiGraphics, centerX, centerY, count, sectorSize);
 
         for (int i = 0; i < count; i++) {
-            TransportOrder order = TransportOrder.values()[i];
+            TransportOrder order = actions.get(i);
             boolean isHovered = order == hoveredAction;
             int startAngle = i * sectorSize;
 
@@ -54,7 +57,9 @@ public class VehicleWheelRenderer {
         // Vehicle orders respect the fire-team scope, so show the same badge as the ping wheel.
         WheelHud.drawScopeBadge(guiGraphics, centerX, centerY);
 
-        WheelCycleController.drawPageHeader(guiGraphics, Component.translatable("wheel.steves_army.vehicle"));
+        String titleKey = WheelCycleController.isVehicleControlPage()
+            ? "wheel.steves_army.vehicle_control" : "wheel.steves_army.vehicle";
+        WheelCycleController.drawPageHeader(guiGraphics, Component.translatable(titleKey));
 
         RenderSystem.enableDepthTest();
         RenderSystem.disableBlend();

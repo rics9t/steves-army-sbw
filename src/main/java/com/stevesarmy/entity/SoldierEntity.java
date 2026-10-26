@@ -1419,11 +1419,6 @@ public class SoldierEntity extends PathfinderMob implements Container {
     }
 
     @Override
-    public boolean stillValid(Player player) {
-        return true;
-    }
-
-    @Override
     public void clearContent() {
         inventory.clearContent();
         setItemSlot(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
@@ -1549,8 +1544,8 @@ public class SoldierEntity extends PathfinderMob implements Container {
             && com.stevesarmy.compat.sbw.SbwCompat.isVehicle(sbwVehicle)
             && !com.stevesarmy.compat.sbw.SbwVehicles.isDrone(sbwVehicle)) {
             // SBW passengers are real taxi riders: keep them seated and freeze
-            // infantry AI. The driver registry handles explicit move pings;
-            // dedicated crew gunnery can still observe and fire from the vehicle.
+            // infantry AI. Dedicated crew gunnery can still observe and fire
+            // from the vehicle while its driver registry handles vehicle orders.
             if (getRole() == SoldierRole.VEHICLE_CREW) {
                 SbwVehicleGunnery.tickMounted(this);
             } else {

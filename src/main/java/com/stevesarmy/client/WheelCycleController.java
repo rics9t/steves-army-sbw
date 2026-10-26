@@ -6,15 +6,15 @@ import net.minecraft.network.chat.Component;
 import org.lwjgl.glfw.GLFW;
 
 /**
- * Multi-page state for the hold-to-open wheels. The middle-mouse ping session has two pages:
- * the ping orders wheel (default) and the vehicle wheel. Pressing the configured cycle mouse
- * button (right-click by default) while the wheel is open flips between them; releasing the
- * wheel key fires the hovered action of the current page.
+ * Multi-page state for the hold-to-open wheels. The middle-mouse ping session cycles through
+ * ping orders, vehicle transport, and vehicle control pages. Releasing the wheel key fires the
+ * hovered action on the current page.
  */
 public final class WheelCycleController {
     public enum Page {
         PING_ORDERS,
-        VEHICLE
+        VEHICLE,
+        VEHICLE_CONTROL
     }
 
     public enum CycleButton {
@@ -62,12 +62,20 @@ public final class WheelCycleController {
             return;
         }
         if (pressed) {
-            page = page == Page.PING_ORDERS ? Page.VEHICLE : Page.PING_ORDERS;
+            page = switch (page) {
+                case PING_ORDERS -> Page.VEHICLE;
+                case VEHICLE -> Page.VEHICLE_CONTROL;
+                case VEHICLE_CONTROL -> Page.PING_ORDERS;
+            };
         }
     }
 
     public static boolean isVehiclePage() {
-        return page == Page.VEHICLE;
+        return page == Page.VEHICLE || page == Page.VEHICLE_CONTROL;
+    }
+
+    public static boolean isVehicleControlPage() {
+        return page == Page.VEHICLE_CONTROL;
     }
 
     public static Page getPage() {

@@ -8,6 +8,8 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
 import java.lang.ref.WeakReference;
@@ -16,8 +18,8 @@ import java.util.Deque;
 import java.util.UUID;
 
 /**
- * Server-side driver for one SBW vehicle. Dedicated vehicle crew can follow
- * their owner; ordinary combat troops only pilot on an explicit move ping.
+ * Server-side driver for one SBW vehicle. Only dedicated vehicle crew may
+ * occupy the driver seat and operate the vehicle.
  *
  * Uses native SBW inputs so acceleration, speed, and handling match the original mod.
  */
@@ -25,7 +27,8 @@ public final class VehicleDriver {
 
     private static final double FOLLOW_DISTANCE = 14.0;
     private static final double BRAKE_DISTANCE = 8.0;
-    private static final double STOP_DISTANCE = 5.0;
+    private static final double MOVE_SLOW_APPROACH_DISTANCE = 10.0;
+    private static final double MOVE_STOP_RADIUS = 2.0;
     private static final double WAYPOINT_TOLERANCE = 3.5;
     private static final float STEER_DEADZONE_DEGREES = 5.0f;
     private static final float HARD_TURN_DEGREES = 45.0f;
@@ -95,7 +98,8 @@ public final class VehicleDriver {
     public void orderHold() {
         this.mode = VehicleDriveMode.HOLD;
         clearPath();
-        releaseControls();
+        Entity vehicle = vehicle();
+        if (vehicle != null) brake(vehicle);
     }
 
     public void orderDismount() {
@@ -136,15 +140,20 @@ public final class VehicleDriver {
             }
         }
 
+        if (soldier != null && soldier.getRole() != SoldierRole.VEHICLE_CREW) {
+            VehicleMountPolicy.enforceCrewDriverSeat(soldier, vehicle);
+            releaseControls();
+            return false;
+        }
+
         SbwVehicles.ensureFuel(vehicle);
         VehicleWeaponController.tick(this, vehicle);
 
         if (soldier != null && soldier.isAlive()) {
             boolean dedicatedCrew = soldier.getRole() == SoldierRole.VEHICLE_CREW;
-            // Infantry use vehicles as transport by default. A move ping is the
-            // explicit opt-in that lets the driver-seat soldier steer; FOLLOW
-            // and ATTACK must not turn every taxi rider into an autonomous driver.
-            if (!dedicatedCrew && soldier.hasValidPingMoveTarget()) {
+            // Only dedicated vehicle crew can occupy and operate the driver seat.
+            // Their move ping sends the vehicle; ordinary infantry remain taxi riders.
+            if (dedicatedCrew && soldier.hasValidPingMoveTarget()) {
                 BlockPos target = soldier.getPingMoveTarget();
                 if (mode != VehicleDriveMode.GO_TO || destination == null || !destination.equals(target)) {
                     orderGoTo(target);
@@ -171,7 +180,7 @@ public final class VehicleDriver {
             case FOLLOW -> tickFollow(vehicle);
             case GO_TO -> tickGoTo(vehicle);
             case ATTACK -> tickAttack(vehicle);
-            case HOLD -> releaseControls();
+            case HOLD -> brake(vehicle);
             case DISMOUNT -> {
                 releaseControls();
                 if (isNearlyStopped(vehicle)) {
@@ -186,32 +195,39 @@ public final class VehicleDriver {
     }
 
     private void tickFollow(Entity vehicle) {
-        Entity target = followTarget.get();
-        if (target == null || !target.isAlive()) {
+        Entity lead = followTarget.get();
+        if (lead == null || !lead.isAlive()) {
             SoldierEntity soldier = driverSoldier();
             if (soldier != null && soldier.getOwner() != null) {
                 Entity owner = soldier.getOwner();
-                Entity lead = owner.isPassenger() ? owner.getVehicle() : owner;
-                Entity ahead = VehicleConvoy.vehicleAheadOf(vehicle, lead);
-                target = ahead != null ? ahead : lead;
-                followTarget = new WeakReference<>(target);
+                lead = owner.isPassenger() ? owner.getVehicle() : owner;
             }
         }
-        if (target == null) {
+        if (lead == null) {
             brake(vehicle);
             return;
         }
 
-        double distance = vehicle.distanceTo(target);
-        if (distance <= BRAKE_DISTANCE) {
+        Entity ahead = VehicleConvoy.vehicleAheadOf(vehicle, lead);
+        Entity target = ahead != null ? ahead : lead;
+        followTarget = new WeakReference<>(lead);
+
+        double distance = horizontalDistance(vehicle.position(), target.position());
+        double stopDistance = Math.max(BRAKE_DISTANCE,
+            VehicleConvoy.safeFollowDistance(vehicle, target));
+        double speed = vehicle.getDeltaMovement().horizontalDistance();
+        if (distance <= stopDistance + speed * 4.0) {
             brake(vehicle);
             return;
         }
-        if (distance <= FOLLOW_DISTANCE) {
-            steerToward(vehicle, target.position(), false);
+
+        Vec3 awayFromLead = horizontal(vehicle.position().subtract(target.position()));
+        if (awayFromLead.lengthSqr() < 0.01) {
+            brake(vehicle);
             return;
         }
-        driveTo(vehicle, BlockPos.containing(target.position()), target.position());
+        Vec3 followPoint = target.position().add(awayFromLead.normalize().scale(stopDistance));
+        driveTo(vehicle, BlockPos.containing(followPoint), followPoint, distance > FOLLOW_DISTANCE);
     }
 
     private void tickGoTo(Entity vehicle) {
@@ -221,7 +237,9 @@ public final class VehicleDriver {
             return;
         }
         Vec3 goal = Vec3.atCenterOf(destination);
-        if (vehicle.position().distanceTo(goal) <= BRAKE_DISTANCE) {
+        double distance = horizontalDistance(vehicle.position(), goal);
+        double speed = vehicle.getDeltaMovement().horizontalDistance();
+        if (distance <= MOVE_STOP_RADIUS && speed <= 0.15) {
             brake(vehicle);
             mode = VehicleDriveMode.HOLD;
             SoldierEntity s = driverSoldier();
@@ -230,7 +248,11 @@ public final class VehicleDriver {
             }
             return;
         }
-        driveTo(vehicle, destination, goal);
+        if (speed > 0.15 && distance <= MOVE_STOP_RADIUS + speed * 4.0) {
+            brake(vehicle);
+            return;
+        }
+        driveTo(vehicle, destination, goal, distance > MOVE_SLOW_APPROACH_DISTANCE);
     }
 
     private void tickAttack(Entity vehicle) {
@@ -266,6 +288,10 @@ public final class VehicleDriver {
     }
 
     private void driveTo(Entity vehicle, BlockPos goalPos, Vec3 goalVec) {
+        driveTo(vehicle, goalPos, goalVec, true);
+    }
+
+    private void driveTo(Entity vehicle, BlockPos goalPos, Vec3 goalVec, boolean allowSprint) {
         if (SbwVehicles.isAirborne(vehicle)) {
             flyTo(vehicle, goalVec);
             return;
@@ -282,9 +308,9 @@ public final class VehicleDriver {
         }
 
         Vec3 waypoint = waypoints.peek();
-        while (waypoint != null
-            && vehicle.position().multiply(1, 0, 1)
-                .distanceTo(waypoint.multiply(1, 0, 1)) <= WAYPOINT_TOLERANCE) {
+        while (waypoint != null) {
+            double tolerance = waypoints.size() == 1 ? 0.9 : WAYPOINT_TOLERANCE;
+            if (horizontalDistance(vehicle.position(), waypoint) > tolerance) break;
             waypoints.poll();
             waypoint = waypoints.peek();
         }
@@ -300,24 +326,39 @@ public final class VehicleDriver {
             return;
         }
 
-        steerToward(vehicle, waypoint, true);
+        steerToward(vehicle, waypoint, true, allowSprint);
     }
 
     private void flyTo(Entity vehicle, Vec3 goal) {
-        steerToward(vehicle, goal, true);
+        if (!steerToward(vehicle, goal, true, true)) {
+            SbwVehicles.up(vehicle, false);
+            SbwVehicles.down(vehicle, false);
+            return;
+        }
         double targetY = goal.y + 18.0;
         double dy = targetY - vehicle.getY();
         SbwVehicles.up(vehicle, dy > 1.5);
         SbwVehicles.down(vehicle, dy < -2.5);
     }
 
-    private void steerToward(Entity vehicle, Vec3 target, boolean accelerate) {
+    private boolean steerToward(Entity vehicle, Vec3 target, boolean accelerate) {
+        return steerToward(vehicle, target, accelerate, accelerate);
+    }
+
+    private boolean steerToward(Entity vehicle, Vec3 target, boolean accelerate,
+                                boolean allowSprint) {
         SbwVehicles.ensureFuel(vehicle);
         Vec3 delta = target.subtract(vehicle.position()).multiply(1, 0, 1);
         double distance = delta.length();
         if (distance < 0.1) {
             brake(vehicle);
-            return;
+            return false;
+        }
+
+        Vec3 driveDirection = delta.scale(1.0 / distance);
+        if (accelerate && shouldBrakeForFriendly(vehicle, driveDirection)) {
+            brake(vehicle);
+            return false;
         }
 
         double desiredYaw = Math.toDegrees(Math.atan2(-delta.x, delta.z));
@@ -328,7 +369,8 @@ public final class VehicleDriver {
         boolean turnRight = error > STEER_DEADZONE_DEGREES;
         boolean sharpTurn = Math.abs(error) > HARD_TURN_DEGREES;
         boolean forward = accelerate && !sharpTurn;
-        boolean sprint = accelerate && !sharpTurn && Math.abs(error) < STEER_DEADZONE_DEGREES;
+        boolean sprint = allowSprint && accelerate && !sharpTurn
+            && Math.abs(error) < STEER_DEADZONE_DEGREES;
 
         // Native SBW acceleration/speed integration
         SbwVehicles.updateInputs(vehicle, forward, false, turnLeft, turnRight, sprint);
@@ -336,6 +378,66 @@ public final class VehicleDriver {
         float maxTurn = 3.5f;
         float step = Mth.clamp(error * 0.25f, -maxTurn, maxTurn);
         vehicle.setYRot(currentYaw + step);
+        return true;
+    }
+
+    /** Brake for allied people and allied vehicles in the vehicle's projected path. */
+    private boolean shouldBrakeForFriendly(Entity vehicle, Vec3 direction) {
+        SoldierEntity soldier = driverSoldier();
+        if (soldier == null || direction.lengthSqr() < 0.01) return false;
+
+        double speed = vehicle.getDeltaMovement().horizontalDistance();
+        double lookAhead = Math.min(32.0,
+            vehicle.getBbWidth() + speed * 7.0 + 6.0);
+        Vec3 travel = direction.scale(lookAhead);
+        AABB corridor = vehicle.getBoundingBox().expandTowards(travel).inflate(0.75, 1.5, 0.75);
+        Vec3 origin = vehicle.getBoundingBox().getCenter();
+        Vec3 lateralAxis = new Vec3(-direction.z, 0.0, direction.x);
+
+        for (Entity candidate : vehicle.level().getEntities(vehicle, corridor)) {
+            if (candidate == vehicle || candidate == soldier || candidate.getVehicle() == vehicle) continue;
+            if (!isFriendlyObstacle(soldier, candidate)) continue;
+
+            Vec3 offset = candidate.getBoundingBox().getCenter().subtract(origin)
+                .multiply(1.0, 0.0, 1.0);
+            double along = offset.dot(direction);
+            if (along <= 0.0 || along > lookAhead) continue;
+            double verticalGap = Math.abs(candidate.getY() - vehicle.getY());
+            if (verticalGap > 4.0) continue;
+
+            double lateral = Math.abs(offset.dot(lateralAxis));
+            double clearance = (vehicle.getBbWidth() + candidate.getBbWidth()) / 2.0 + 1.5;
+            if (lateral > clearance) continue;
+
+            // Include a speed-based braking margin so the hull stops before the
+            // friendly entity, then remains stopped until that lane is clear.
+            double brakingGap = clearance + Math.max(2.0, speed * 5.0);
+            if (along <= brakingGap) return true;
+        }
+        return false;
+    }
+
+    private static boolean isFriendlyObstacle(SoldierEntity observer, Entity candidate) {
+        if (candidate instanceof LivingEntity living) {
+            return observer.isFriendlyTo(living);
+        }
+        if (com.stevesarmy.compat.sbw.SbwCompat.isVehicle(candidate)) {
+            if (com.stevesarmy.compat.SbwCompat.hasFriendlyOccupant(observer, candidate)) {
+                return true;
+            }
+            VehicleDriver driver = VehicleDriverRegistry.get(candidate);
+            SoldierEntity otherDriver = driver != null ? driver.driverSoldier() : null;
+            return otherDriver != null && observer.isFriendlyTo(otherDriver);
+        }
+        return false;
+    }
+
+    private static double horizontalDistance(Vec3 first, Vec3 second) {
+        return horizontal(first.subtract(second)).length();
+    }
+
+    private static Vec3 horizontal(Vec3 value) {
+        return new Vec3(value.x, 0.0, value.z);
     }
 
     private void brake(Entity vehicle) {
