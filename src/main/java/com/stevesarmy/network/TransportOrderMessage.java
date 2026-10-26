@@ -99,7 +99,7 @@ public class TransportOrderMessage {
         }
 
         // Dedicated vehicle crew board separately from the ordinary infantry taxi order.
-        Entity aimedVehicle = resolveAimedVehicle(sender);
+        Entity aimedVehicle = resolveVehicleForMount(sender, level, aimPosition);
         if (aimedVehicle != null && com.stevesarmy.compat.SbwCompat.isOperational(aimedVehicle)) {
             List<SoldierEntity> crew = crewInScope(
                 level, sender, CrewAssignment.stationlessCrewNear(level, sender, aimPosition, 64), scope);
@@ -270,6 +270,33 @@ public class TransportOrderMessage {
         return null;
     }
 
+    /** Uses the same direct-hit, view-ray, and nearby-aim fallbacks for infantry and crew mounting. */
+    private static Entity resolveVehicleForMount(ServerPlayer sender, ServerLevel level, Vec3 aimPosition) {
+        if (!SbwCompat.hasVehicles()) {
+            return null;
+        }
+
+        Entity vehicle = resolveAimedVehicle(sender);
+        if (vehicle != null) {
+            return vehicle;
+        }
+
+        Vec3 eye = sender.getEyePosition();
+        Vec3 look = sender.getViewVector(1.0f);
+        Vec3 end = eye.add(look.scale(64.0));
+        AABB rayBox = sender.getBoundingBox().expandTowards(look.scale(64.0)).inflate(4.0);
+        List<Entity> vehicles = level.getEntitiesOfClass(Entity.class, rayBox, SbwCompat::isVehicle);
+        for (Entity candidate : vehicles) {
+            if (candidate.getBoundingBox().inflate(1.5).clip(eye, end).isPresent()) {
+                return candidate;
+            }
+        }
+
+        List<Entity> nearAim = level.getEntitiesOfClass(Entity.class,
+            new AABB(aimPosition, aimPosition).inflate(8.0), SbwCompat::isVehicle);
+        return nearAim.isEmpty() ? null : nearAim.get(0);
+    }
+
     /**
      * Ship resolution in /vs get-ship order (the crew assign stick's order): the
      * vanilla clip's hit block is the authoritative crosshair pick, so the ship
@@ -304,48 +331,27 @@ public class TransportOrderMessage {
             return;
         }
 
-        if (SbwCompat.hasVehicles()) {
-            Entity targetedVehicle = resolveAimedVehicle(sender);
-            if (targetedVehicle == null) {
-                Vec3 eye = sender.getEyePosition();
-                Vec3 look = sender.getViewVector(1.0f);
-                Vec3 end = eye.add(look.scale(64.0));
-                AABB rayBox = sender.getBoundingBox().expandTowards(look.scale(64.0)).inflate(4.0);
-                List<Entity> vehicles = level.getEntitiesOfClass(Entity.class, rayBox, SbwCompat::isVehicle);
-                for (Entity v : vehicles) {
-                    if (v.getBoundingBox().inflate(1.5).clip(eye, end).isPresent()) {
-                        targetedVehicle = v;
-                        break;
+        Entity targetedVehicle = resolveVehicleForMount(sender, level, aimPosition);
+        if (targetedVehicle != null && !SbwVehicles.isWrecked(targetedVehicle)) {
+            int seated = 0;
+            for (SoldierEntity soldier : eligible) {
+                if (SbwVehicles.hasFreeSeat(targetedVehicle)) {
+                    soldier.getNavigation().stop();
+                    soldier.cancelCoverMovement();
+                    soldier.setDeltaMovement(Vec3.ZERO);
+                    if (VehicleMountPolicy.board(soldier, targetedVehicle)) {
+                        VehicleDriverRegistry.onBoarded(soldier, targetedVehicle);
+                        seated++;
                     }
                 }
             }
-            if (targetedVehicle == null) {
-                List<Entity> nearAim = level.getEntitiesOfClass(Entity.class, new AABB(aimPosition, aimPosition).inflate(8.0), SbwCompat::isVehicle);
-                if (!nearAim.isEmpty()) {
-                    targetedVehicle = nearAim.get(0);
-                }
+            StevesArmyMod.LOGGER.info("[Transport] MOUNT by {}: eligible={} seated={} (via SBW)", sender.getName().getString(), eligible.size(), seated);
+            if (seated == 0) {
+                sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.no_free_seats"), true);
+            } else {
+                sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.seated", seated, eligible.size()), true);
             }
-            if (targetedVehicle != null && !SbwVehicles.isWrecked(targetedVehicle)) {
-                int seated = 0;
-                for (SoldierEntity soldier : eligible) {
-                    if (SbwVehicles.hasFreeSeat(targetedVehicle)) {
-                        soldier.getNavigation().stop();
-                        soldier.cancelCoverMovement();
-                        soldier.setDeltaMovement(Vec3.ZERO);
-                        if (VehicleMountPolicy.board(soldier, targetedVehicle)) {
-                            VehicleDriverRegistry.onBoarded(soldier, targetedVehicle);
-                            seated++;
-                        }
-                    }
-                }
-                StevesArmyMod.LOGGER.info("[Transport] MOUNT by {}: eligible={} seated={} (via SBW)", sender.getName().getString(), eligible.size(), seated);
-                if (seated == 0) {
-                    sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.no_free_seats"), true);
-                } else {
-                    sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.seated", seated, eligible.size()), true);
-                }
-                return;
-            }
+            return;
         }
 
         if (!VS2Compat.isEnabled()) {
