@@ -6,6 +6,7 @@ import com.stevesarmy.compat.sbw.SbwCompat;
 import com.stevesarmy.compat.sbw.SbwVehicles;
 import com.stevesarmy.combat.StationGunnerAI;
 import com.stevesarmy.entity.SoldierEntity;
+import com.stevesarmy.entity.SoldierRole;
 import com.stevesarmy.ping.PingType;
 import com.stevesarmy.squad.FireTeam;
 import com.stevesarmy.squad.FireTeamAssignment;
@@ -14,7 +15,7 @@ import com.stevesarmy.transport.CrewAssignment;
 import com.stevesarmy.transport.TransportOrder;
 import com.stevesarmy.vehicle.VehicleDriver;
 import com.stevesarmy.vehicle.VehicleDriverRegistry;
-import com.stevesarmy.vehicle.VehicleMountPolicy;
+import com.stevesarmy.vehicle.VehicleBoardingManager;
 import com.stevesarmy.vehicle.VehicleWreckHandler;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.FriendlyByteBuf;
@@ -107,12 +108,12 @@ public class TransportOrderMessage {
                 sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.no_crew"), true);
                 return;
             }
-            int seated = CrewAssignment.mountCrewOnVehicle(level, aimedVehicle, crew);
-            StevesArmyMod.LOGGER.info("[Transport] MOUNT_CREW by {}: vehicle={} type={} crew={} seated={}",
+            int boarding = CrewAssignment.mountCrewOnVehicle(level, aimedVehicle, crew);
+            StevesArmyMod.LOGGER.info("[Transport] MOUNT_CREW by {}: vehicle={} type={} crew={} boarding={}",
                 sender.getName().getString(), aimedVehicle.getId(),
-                com.stevesarmy.compat.SbwCompat.getVehicleTypeName(aimedVehicle), crew.size(), seated);
+                com.stevesarmy.compat.SbwCompat.getVehicleTypeName(aimedVehicle), crew.size(), boarding);
             sender.displayClientMessage(
-                Component.translatable("transport.steves_army.feedback.seated", seated, crew.size()), true);
+                Component.translatable("transport.steves_army.feedback.boarding", boarding, crew.size()), true);
             return;
         }
 
@@ -156,6 +157,7 @@ public class TransportOrderMessage {
         List<SoldierEntity> crew = SquadTargeting.resolveOrderedVehicleCrew(level, sender, scope);
         int dismounted = 0;
         for (SoldierEntity soldier : crew) {
+            VehicleBoardingManager.cancel(soldier);
             boolean hadDuty = StationGunnerAI.soldierHasStation(soldier);
             StationGunnerAI.deactivateForSoldier(soldier);
             boolean wasMounted = false;
@@ -216,9 +218,30 @@ public class TransportOrderMessage {
             sender.displayClientMessage(
                 Component.translatable("transport.steves_army.feedback.no_vehicle_driver_in_scope"), true);
         } else {
+            if (order != PingType.FOLLOW && order != PingType.HOLD) {
+                broadcastVehicleCommandMarker(sender, level, scope, order, aimPosition);
+            }
             sender.displayClientMessage(Component.translatable(
                 "transport.steves_army.feedback.vehicle_orders_issued", commandedVehicles.size()), true);
         }
+    }
+
+    private static void broadcastVehicleCommandMarker(ServerPlayer sender, ServerLevel level,
+                                                       FireTeam scope, PingType order, Vec3 position) {
+        int teamColor = 0xFFFFFFFF;
+        if (sender.getTeam() != null) {
+            Integer color = sender.getTeam().getColor().getColor();
+            if (color != null) teamColor = (255 << 24) | color;
+        }
+        boolean persistent = com.stevesarmy.squad.SquadActivityType.fromPingType(order) != null;
+        List<ServerPlayer> recipients = level.getServer().getPlayerList().getPlayers().stream()
+            .filter(player -> sender.getTeam() == null || player.getTeam() == sender.getTeam())
+            .filter(player -> !persistent || !player.getUUID().equals(sender.getUUID()))
+            .toList();
+        PingBroadcastMessage marker = new PingBroadcastMessage(order, position,
+            sender.level().dimension().location().hashCode(), sender.getUUID(),
+            sender.getGameProfile().getName(), teamColor, scope.ordinal());
+        for (ServerPlayer recipient : recipients) NetworkHandler.sendTo(recipient, marker);
     }
 
     private static void handleDismount(ServerPlayer sender, List<SoldierEntity> soldiers) {
@@ -226,13 +249,21 @@ public class TransportOrderMessage {
             sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.no_soldiers"), true);
             return;
         }
+        List<SoldierEntity> infantry = soldiers.stream()
+            .filter(soldier -> soldier.getRole() != SoldierRole.VEHICLE_CREW)
+            .toList();
+        if (infantry.isEmpty()) {
+            sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.none_mounted"), true);
+            return;
+        }
 
         int dismounted = 0;
         if (SbwCompat.isLoaded() && com.stevesarmy.compat.SbwCompat.isEnabled()) {
-            dismounted += VehicleWreckHandler.dismountAll(soldiers);
+            dismounted += VehicleWreckHandler.dismountAll(infantry);
         }
 
-        for (SoldierEntity soldier : soldiers) {
+        for (SoldierEntity soldier : infantry) {
+            VehicleBoardingManager.cancel(soldier);
             // releaseTransport exits at the hatch: the handle linked to the soldier's
             // seat first, then the nearest handle on their ship (no link required).
             if (VS2Compat.releaseTransport(soldier)) {
@@ -240,7 +271,7 @@ public class TransportOrderMessage {
             }
         }
         StevesArmyMod.LOGGER.info("[Transport] DISMOUNT by {}: resolved={} dismounted={}",
-            sender.getName().getString(), soldiers.size(), dismounted);
+            sender.getName().getString(), infantry.size(), dismounted);
 
         if (dismounted == 0) {
             sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.none_mounted"), true);
@@ -324,7 +355,7 @@ public class TransportOrderMessage {
             return;
         }
         List<SoldierEntity> eligible = soldiers.stream()
-            .filter(s -> !s.isPassenger())
+            .filter(s -> !s.isPassenger() && s.getRole() != SoldierRole.VEHICLE_CREW)
             .toList();
         if (eligible.isEmpty()) {
             sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.all_mounted"), true);
@@ -333,23 +364,17 @@ public class TransportOrderMessage {
 
         Entity targetedVehicle = resolveVehicleForMount(sender, level, aimPosition);
         if (targetedVehicle != null && !SbwVehicles.isWrecked(targetedVehicle)) {
-            int seated = 0;
+            int boarding = 0;
             for (SoldierEntity soldier : eligible) {
-                if (SbwVehicles.hasFreeSeat(targetedVehicle)) {
-                    soldier.getNavigation().stop();
-                    soldier.cancelCoverMovement();
-                    soldier.setDeltaMovement(Vec3.ZERO);
-                    if (VehicleMountPolicy.board(soldier, targetedVehicle)) {
-                        VehicleDriverRegistry.onBoarded(soldier, targetedVehicle);
-                        seated++;
-                    }
+                if (VehicleBoardingManager.requestBoard(soldier, targetedVehicle)) {
+                    boarding++;
                 }
             }
-            StevesArmyMod.LOGGER.info("[Transport] MOUNT by {}: eligible={} seated={} (via SBW)", sender.getName().getString(), eligible.size(), seated);
-            if (seated == 0) {
+            StevesArmyMod.LOGGER.info("[Transport] MOUNT by {}: eligible={} boarding={} (via SBW)", sender.getName().getString(), eligible.size(), boarding);
+            if (boarding == 0) {
                 sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.no_free_seats"), true);
             } else {
-                sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.seated", seated, eligible.size()), true);
+                sender.displayClientMessage(Component.translatable("transport.steves_army.feedback.boarding", boarding, eligible.size()), true);
             }
             return;
         }

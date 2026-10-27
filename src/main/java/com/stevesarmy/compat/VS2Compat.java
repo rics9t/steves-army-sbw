@@ -813,6 +813,17 @@ public final class VS2Compat {
         if (wanted < 0 || (wanted == 0 && soldier.getRole() != SoldierRole.VEHICLE_CREW)) {
             return false;
         }
+        return seatSoldierOnEntityAtSeat(soldier, vehicle, wanted);
+    }
+
+    /** Mounts on a previously reserved SBW seat after the soldier has walked up to the vehicle. */
+    public static boolean seatSoldierOnEntityAtSeat(SoldierEntity soldier, Entity vehicle, int wanted) {
+        if (soldier == null || soldier.isPassenger() || vehicle == null || vehicle.isRemoved()
+            || wanted < 0 || wanted >= SbwCompat.maxPassengers(vehicle)
+            || SbwCompat.passengerInSeat(vehicle, wanted) != null
+            || (wanted == 0 && soldier.getRole() != SoldierRole.VEHICLE_CREW)) {
+            return false;
+        }
         Vec3 preMountPos = soldier.position();
         authorizedMounts.put(soldier.getUUID(), vehicle.getUUID());
         try {

@@ -65,6 +65,18 @@ public final class SbwVehicles {
         return seatIndexOf(vehicle, passenger) == 0;
     }
 
+    public static int turretControllerIndex(Entity vehicle) {
+        if (isDrone(vehicle)) return -1;
+        return SbwReflection.asInt(
+            SbwReflection.get(vehicle, "turretControllerIndex", "getTurretControllerIndex"), 0);
+    }
+
+    public static int passengerWeaponStationControllerIndex(Entity vehicle) {
+        if (isDrone(vehicle)) return -1;
+        return SbwReflection.asInt(SbwReflection.get(vehicle,
+            "passengerWeaponStationControllerIndex", "getPassengerWeaponStationControllerIndex"), -1);
+    }
+
     private static Object seatInfo(Entity vehicle, int seatIndex) {
         if (isDrone(vehicle)) return null;
         return SbwReflection.call(vehicle, new String[]{"getSeat"}, seatIndex);
@@ -78,7 +90,9 @@ public final class SbwVehicles {
         Object seat = seatInfo(vehicle, seatIndex);
         if (seat == null) return false;
         Object ban = SbwReflection.get(seat, "banHand", "getBanHand", "isBanHand");
-        return !SbwReflection.asBool(ban, false);
+        // SBW also bans handheld input automatically when the seat has a
+        // mounted weapon, even when the JSON BanHand flag is false.
+        return !SbwReflection.asBool(ban, false) && !seatHasWeapon(vehicle, seatIndex);
     }
 
     /** Weapon station names available to the given seat, possibly empty. */
@@ -105,6 +119,18 @@ public final class SbwVehicles {
         if (isDrone(vehicle)) return null;
         Object res = SbwReflection.call(vehicle, new String[]{"getGunName"}, seatIndex);
         return res instanceof String s ? s : null;
+    }
+
+    public static int weaponIndex(Entity vehicle, int seatIndex) {
+        if (isDrone(vehicle)) return -1;
+        return SbwReflection.asInt(
+            SbwReflection.call(vehicle, new String[]{"getWeaponIndex"}, seatIndex), -1);
+    }
+
+    /** Select a weapon from this seat's own weapon list (never another seat's gun). */
+    public static void setWeaponIndex(Entity vehicle, int seatIndex, int weaponIndex) {
+        if (!SbwCompat.isVehicle(vehicle) || isDrone(vehicle) || weaponIndex < 0) return;
+        SbwReflection.call(vehicle, new String[]{"setWeaponIndex"}, seatIndex, weaponIndex);
     }
 
     // -- health & fuel --------------------------------------------------------
@@ -233,8 +259,8 @@ public final class SbwVehicles {
         if (!SbwCompat.isVehicle(vehicle) || isDrone(vehicle) || aimVec == null) return;
         Class<?> utilsClass = SbwReflection.cls("com.atsuishio.superbwarfare.entity.vehicle.utils.VehicleWeaponUtils");
         if (utilsClass == null) return;
-        int turretIdx = SbwReflection.asInt(SbwReflection.get(vehicle, "turretControllerIndex", "getTurretControllerIndex"), 0);
-        int weaponStationIdx = SbwReflection.asInt(SbwReflection.get(vehicle, "passengerWeaponStationControllerIndex", "getPassengerWeaponStationControllerIndex"), 1);
+        int turretIdx = turretControllerIndex(vehicle);
+        int weaponStationIdx = passengerWeaponStationControllerIndex(vehicle);
 
         if (seatIndex == turretIdx) {
             SbwReflection.callStatic(utilsClass, new String[]{"turretAutoAimFromVector"}, vehicle, aimVec);

@@ -27,10 +27,10 @@ import java.util.UUID;
 public final class VehicleDriver {
 
     private static final double FOLLOW_DISTANCE = 14.0;
-    private static final double BRAKE_DISTANCE = 8.0;
+    private static final double BRAKE_DISTANCE = 12.0;
     private static final double MOVE_SLOW_APPROACH_DISTANCE = 10.0;
     private static final double MOVE_STOP_RADIUS = 3.0;
-    private static final double FOLLOW_STOPPING_TICKS = 8.0;
+    private static final double FOLLOW_STOPPING_TICKS = 10.0;
     private static final double WAYPOINT_TOLERANCE = 1.0;
     private static final float STEER_DEADZONE_DEGREES = 5.0f;
     private static final float HARD_TURN_DEGREES = 35.0f;
@@ -447,8 +447,8 @@ public final class VehicleDriver {
         if (soldier == null || direction.lengthSqr() < 0.01) return false;
 
         double speed = vehicle.getDeltaMovement().horizontalDistance();
-        double lookAhead = Math.min(32.0,
-            vehicle.getBbWidth() + speed * 7.0 + 6.0);
+        double lookAhead = Math.min(48.0,
+            vehicle.getBbWidth() + speed * 10.0 + 8.0);
         Vec3 travel = direction.scale(lookAhead);
         AABB corridor = vehicle.getBoundingBox().expandTowards(travel).inflate(0.75, 1.5, 0.75);
         Vec3 origin = vehicle.getBoundingBox().getCenter();
@@ -471,7 +471,7 @@ public final class VehicleDriver {
 
             // Include a speed-based braking margin so the hull stops before the
             // friendly entity, then remains stopped until that lane is clear.
-            double brakingGap = clearance + Math.max(2.0, speed * 5.0);
+            double brakingGap = clearance + Math.max(3.0, speed * 9.0);
             if (along <= brakingGap) return true;
         }
         return false;

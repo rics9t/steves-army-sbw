@@ -111,12 +111,12 @@ public class CommandStickAssignCrewPacket {
                         msg.crewIds.size());
                     return;
                 }
-                int seated = CrewAssignment.mountCrewOnVehicle(level, vehicle, vehicleCrew);
-                StevesArmyMod.LOGGER.info("[CrewStick] vehicle assign: vehicle={} type={} crew={}/{} seated={}",
+                int boarding = CrewAssignment.mountCrewOnVehicle(level, vehicle, vehicleCrew);
+                StevesArmyMod.LOGGER.info("[CrewStick] vehicle assign: vehicle={} type={} crew={}/{} boarding={}",
                     vehicle.getId(), SbwCompat.getVehicleTypeName(vehicle),
-                    vehicleCrew.size(), msg.crewIds.size(), seated);
+                    vehicleCrew.size(), msg.crewIds.size(), boarding);
                 sender.displayClientMessage(
-                    Component.translatable("transport.steves_army.feedback.crew_assigned", seated, vehicleCrew.size()), true);
+                    Component.translatable("transport.steves_army.feedback.crew_assigned", boarding, vehicleCrew.size()), true);
                 return;
             }
             // Ship resolution in /vs get-ship order: the vanilla clip's hit block is

@@ -1,10 +1,11 @@
 package com.stevesarmy.vehicle;
 
 import com.stevesarmy.compat.sbw.SbwVehicles;
+import com.stevesarmy.compat.sbw.SbwCompat;
 import com.stevesarmy.entity.SoldierEntity;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
-import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.Map;
@@ -14,7 +15,6 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class VehicleWeaponController {
 
     private static final Map<String, Long> NEXT_FIRE = new ConcurrentHashMap<>();
-    private static final int DEFAULT_COOLDOWN_TICKS = 40;
     private static final int HEAT_CUTOFF = 90;
 
     private VehicleWeaponController() {
@@ -31,6 +31,7 @@ public final class VehicleWeaponController {
 
         if (!engaging) {
             SbwVehicles.fire(vehicle, false);
+            aimIdleTurret(vehicle);
             return;
         }
 
@@ -45,10 +46,19 @@ public final class VehicleWeaponController {
             || spotter == null || spotter.isFriendlyTo(target)
             || !spotter.isProactiveTarget(target)) {
             SbwVehicles.fire(vehicle, false);
+            aimIdleTurret(vehicle);
             return;
         }
         targetId = target.getUUID();
-        Vec3 targetPos = target.getBoundingBox().getCenter();
+        Entity targetVehicle = target.getVehicle();
+        Vec3 targetPos = SbwCompat.isVehicle(targetVehicle)
+            ? targetVehicle.getBoundingBox().getCenter()
+            : target.getBoundingBox().getCenter();
+
+        // The driver seat owns the main turret's selectable weapons. Prefer
+        // the cannon against hostile crew inside a vehicle and the coaxial MG
+        // against exposed infantry; passenger stations keep their own loadout.
+        selectMainWeapon(vehicle, target);
 
         long now = vehicle.level().getGameTime();
         int seats = SbwVehicles.maxPassengers(vehicle);
@@ -58,14 +68,15 @@ public final class VehicleWeaponController {
             if (!(occupant instanceof SoldierEntity gunner)) continue;
             if (!SbwVehicles.seatHasWeapon(vehicle, seatIndex)) continue;
 
+            String weaponName = SbwVehicles.getGunName(vehicle, seatIndex);
+            if (weaponName == null) continue;
+
             if (SbwVehicles.ammoCount(vehicle, seatIndex) <= 0) continue;
             if (SbwVehicles.weaponHeat(vehicle, seatIndex) >= HEAT_CUTOFF) continue;
 
-            String key = vehicle.getUUID() + ":" + seatIndex;
+            String key = vehicle.getUUID() + ":" + seatIndex + ":" + weaponName;
             long next = NEXT_FIRE.getOrDefault(key, 0L);
             if (now < next) continue;
-
-            faceTarget(gunner, targetPos);
 
             Vec3 shootPos = SbwVehicles.shootPos(vehicle, seatIndex);
             Vec3 aimVec = targetPos.subtract(shootPos).normalize();
@@ -73,30 +84,51 @@ public final class VehicleWeaponController {
 
             boolean fired = SbwVehicles.shoot(vehicle, gunner, targetId, targetPos);
             if (fired) {
-                NEXT_FIRE.put(key, now + cooldownFor(vehicle, seatIndex));
+                NEXT_FIRE.put(key, now + cooldownFor(vehicle, seatIndex, weaponName));
             }
         }
     }
 
-    private static int cooldownFor(Entity vehicle, int seatIndex) {
+    private static void selectMainWeapon(Entity vehicle, LivingEntity target) {
+        int seat = SbwVehicles.turretControllerIndex(vehicle);
+        if (seat < 0) return;
+        boolean armoredTarget = SbwCompat.isVehicle(target.getVehicle());
+        java.util.List<String> weapons = SbwVehicles.seatWeapons(vehicle, seat);
+        for (int i = 0; i < weapons.size(); i++) {
+            String name = weapons.get(i).toLowerCase(java.util.Locale.ROOT);
+            boolean match = armoredTarget
+                ? name.contains("cannon") || name.contains("main_gun") || name.equals("main")
+                : name.contains("machinegun") || name.contains("machine_gun")
+                    || name.contains("coax") || name.equals("mg");
+            if (match && SbwVehicles.weaponIndex(vehicle, seat) != i) {
+                SbwVehicles.setWeaponIndex(vehicle, seat, i);
+            }
+            if (match) return;
+        }
+    }
+
+    private static int cooldownFor(Entity vehicle, int seatIndex, String weaponName) {
+        String normalized = weaponName.toLowerCase(java.util.Locale.ROOT);
+        if (normalized.contains("machinegun") || normalized.contains("machine_gun")
+            || normalized.contains("coax") || normalized.equals("mg")) {
+            return 2;
+        }
+        if (normalized.contains("missile") || normalized.contains("rocket")) return 40;
         SbwVehicles.Kind kind = SbwVehicles.kind(vehicle);
         if (seatIndex == 0 && kind == SbwVehicles.Kind.TRACKED) {
             return 80;
         }
-        if (kind == SbwVehicles.Kind.HELICOPTER || kind == SbwVehicles.Kind.AIRCRAFT) {
-            return 10;
-        }
-        return seatIndex == 0 ? DEFAULT_COOLDOWN_TICKS : 15;
+        return kind == SbwVehicles.Kind.HELICOPTER || kind == SbwVehicles.Kind.AIRCRAFT ? 10 : 15;
     }
 
-    private static void faceTarget(SoldierEntity gunner, Vec3 target) {
-        Vec3 delta = target.subtract(gunner.getEyePosition());
-        double horizontal = Math.sqrt(delta.x * delta.x + delta.z * delta.z);
-        float yaw = (float) (Math.toDegrees(Math.atan2(delta.z, delta.x)) - 90.0);
-        float pitch = (float) -Math.toDegrees(Math.atan2(delta.y, horizontal));
-        gunner.setYRot(yaw);
-        gunner.yHeadRot = yaw;
-        gunner.setXRot(Math.max(-90f, Math.min(90f, pitch)));
+    private static void aimIdleTurret(Entity vehicle) {
+        int seat = SbwVehicles.turretControllerIndex(vehicle);
+        if (seat < 0 || !SbwVehicles.seatHasWeapon(vehicle, seat)) return;
+        long time = vehicle.level().getGameTime();
+        double phase = (time + vehicle.getId() * 19.0) * (Math.PI / 240.0);
+        float yaw = vehicle.getYRot() + (float) (Math.sin(phase) * 28.0);
+        Vec3 direction = Vec3.directionFromRotation(-3.0F, yaw);
+        SbwVehicles.aimWeapon(vehicle, seat, direction);
     }
 
     public static void forget(Entity vehicle) {

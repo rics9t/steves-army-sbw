@@ -27,9 +27,9 @@ import java.util.Set;
  */
 public final class VehiclePathfinder {
 
-    /** Two-block cells retain useful turn geometry without an excessive search. */
-    private static final int CELL = 2;
-    private static final int MAX_NODES = 2400;
+    /** Coarse cells keep vehicle replans responsive; hull checks retain clearance. */
+    private static final int CELL = 4;
+    private static final int MAX_NODES = 1500;
     /** Vehicles can climb this many blocks between adjacent cells. */
     private static final int MAX_STEP_UP = 1;
     private static final int MAX_DROP = 3;

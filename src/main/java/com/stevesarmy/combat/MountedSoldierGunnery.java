@@ -6,6 +6,7 @@ import com.stevesarmy.compat.sbw.SbwVehicles;
 import com.stevesarmy.entity.SoldierEntity;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.util.Mth;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.Comparator;
@@ -93,10 +94,17 @@ public final class MountedSoldierGunnery {
     private static void faceTarget(SoldierEntity soldier, Vec3 target) {
         Vec3 delta = target.subtract(soldier.getEyePosition());
         double horizontal = Math.sqrt(delta.x * delta.x + delta.z * delta.z);
-        float yaw = (float) (Math.toDegrees(Math.atan2(delta.z, delta.x)) - 90.0);
-        float pitch = (float) -Math.toDegrees(Math.atan2(delta.y, horizontal));
-        soldier.setYRot(yaw);
-        soldier.yHeadRot = yaw;
-        soldier.setXRot(Math.max(-90.0f, Math.min(90.0f, pitch)));
+        float targetYaw = (float) (Math.toDegrees(Math.atan2(delta.z, delta.x)) - 90.0);
+        float targetPitch = (float) -Math.toDegrees(Math.atan2(delta.y, horizontal));
+
+        // SBW rewrites seated rider transforms every tick. Blend the body and
+        // head toward the rifle target instead of snapping all three rotations,
+        // which caused mounted soldiers' heads to shake against the seat pose.
+        float bodyYaw = Mth.approachDegrees(soldier.yBodyRot, targetYaw, 4.0f);
+        float headYaw = Mth.approachDegrees(soldier.getYHeadRot(), targetYaw, 8.0f);
+        soldier.setYRot(bodyYaw);
+        soldier.setYBodyRot(bodyYaw);
+        soldier.setYHeadRot(headYaw);
+        soldier.setXRot(Mth.approach(soldier.getXRot(), Mth.clamp(targetPitch, -90.0f, 90.0f), 5.0f));
     }
 }

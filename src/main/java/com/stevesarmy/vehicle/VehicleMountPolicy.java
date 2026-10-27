@@ -60,12 +60,8 @@ public final class VehicleMountPolicy {
 
     public static boolean board(SoldierEntity soldier, Entity vehicle) {
         if (!canBoard(soldier, vehicle)) return false;
-        boolean preferGunnerSeat = soldier.getRole() != SoldierRole.VEHICLE_CREW
-            || com.stevesarmy.compat.SbwCompat.passengerInSeat(vehicle, 0) != null;
-        boolean ok = VS2Compat.seatSoldierOnEntity(soldier, vehicle, preferGunnerSeat);
-        if (!ok) {
-            revoke(soldier);
-        } else if (soldier.getRole() != SoldierRole.VEHICLE_CREW) {
+        boolean ok = VehicleBoardingManager.requestBoard(soldier, vehicle);
+        if (ok && soldier.getRole() != SoldierRole.VEHICLE_CREW) {
             // A taxi rider's previous infantry target must not become a vehicle
             // gunner target while the soldier's usual combat AI is frozen.
             soldier.setTarget(null);
