@@ -125,8 +125,8 @@ public final class VehicleWeaponController {
         int seat = SbwVehicles.turretControllerIndex(vehicle);
         if (seat < 0 || !SbwVehicles.seatHasWeapon(vehicle, seat)) return;
         long time = vehicle.level().getGameTime();
-        double phase = (time + vehicle.getId() * 19.0) * (Math.PI / 240.0);
-        float yaw = vehicle.getYRot() + (float) (Math.sin(phase) * 28.0);
+        double phase = (time + vehicle.getId() * 19.0) * (Math.PI / 140.0);
+        float yaw = vehicle.getYRot() + (float) (Math.sin(phase) * 22.0);
         Vec3 direction = Vec3.directionFromRotation(-3.0F, yaw);
         SbwVehicles.aimWeapon(vehicle, seat, direction);
     }

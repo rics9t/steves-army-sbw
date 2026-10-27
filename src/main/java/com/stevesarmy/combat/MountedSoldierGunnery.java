@@ -97,13 +97,11 @@ public final class MountedSoldierGunnery {
         float targetYaw = (float) (Math.toDegrees(Math.atan2(delta.z, delta.x)) - 90.0);
         float targetPitch = (float) -Math.toDegrees(Math.atan2(delta.y, horizontal));
 
-        // SBW rewrites seated rider transforms every tick. Blend the body and
-        // head toward the rifle target instead of snapping all three rotations,
-        // which caused mounted soldiers' heads to shake against the seat pose.
-        float bodyYaw = Mth.approachDegrees(soldier.yBodyRot, targetYaw, 4.0f);
+        // SBW controls the seated body's rotation from its seat transform.
+        // Changing YRot/YBodyRot here fights that update and makes the head
+        // oscillate. Track with the head and pitch; the handheld firing API
+        // aims at the target position independently of body yaw.
         float headYaw = Mth.approachDegrees(soldier.getYHeadRot(), targetYaw, 8.0f);
-        soldier.setYRot(bodyYaw);
-        soldier.setYBodyRot(bodyYaw);
         soldier.setYHeadRot(headYaw);
         soldier.setXRot(Mth.approach(soldier.getXRot(), Mth.clamp(targetPitch, -90.0f, 90.0f), 5.0f));
     }

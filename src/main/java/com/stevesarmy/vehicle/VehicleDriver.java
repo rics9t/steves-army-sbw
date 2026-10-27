@@ -31,6 +31,7 @@ public final class VehicleDriver {
     private static final double MOVE_SLOW_APPROACH_DISTANCE = 10.0;
     private static final double MOVE_STOP_RADIUS = 3.0;
     private static final double FOLLOW_STOPPING_TICKS = 10.0;
+    private static final double INERTIA_BRAKE_FACTOR = 8.0;
     private static final double WAYPOINT_TOLERANCE = 1.0;
     private static final float STEER_DEADZONE_DEGREES = 5.0f;
     private static final float HARD_TURN_DEGREES = 35.0f;
@@ -238,7 +239,7 @@ public final class VehicleDriver {
         double speed = vehicle.getDeltaMovement().horizontalDistance();
 
         if (!followBraking
-            && distance <= stopDistance + Math.max(2.0, speed * FOLLOW_STOPPING_TICKS)) {
+            && distance <= stopDistance + Math.max(2.0, brakingTravel(speed))) {
             followBraking = true;
         }
         if (followBraking) {
@@ -267,7 +268,7 @@ public final class VehicleDriver {
         double distance = horizontalDistance(vehicle.position(), goal);
         double speed = vehicle.getDeltaMovement().horizontalDistance();
         if (!destinationBraking && speed > 0.1
-            && distance <= MOVE_STOP_RADIUS + 1.0 + speed * FOLLOW_STOPPING_TICKS) {
+            && distance <= MOVE_STOP_RADIUS + 1.0 + brakingTravel(speed)) {
             destinationBraking = true;
         }
         if (destinationBraking) {
@@ -447,8 +448,8 @@ public final class VehicleDriver {
         if (soldier == null || direction.lengthSqr() < 0.01) return false;
 
         double speed = vehicle.getDeltaMovement().horizontalDistance();
-        double lookAhead = Math.min(48.0,
-            vehicle.getBbWidth() + speed * 10.0 + 8.0);
+        double brakingTravel = brakingTravel(speed);
+        double lookAhead = Math.min(48.0, vehicle.getBbWidth() + brakingTravel + 8.0);
         Vec3 travel = direction.scale(lookAhead);
         AABB corridor = vehicle.getBoundingBox().expandTowards(travel).inflate(0.75, 1.5, 0.75);
         Vec3 origin = vehicle.getBoundingBox().getCenter();
@@ -471,7 +472,7 @@ public final class VehicleDriver {
 
             // Include a speed-based braking margin so the hull stops before the
             // friendly entity, then remains stopped until that lane is clear.
-            double brakingGap = clearance + Math.max(3.0, speed * 9.0);
+            double brakingGap = clearance + Math.max(3.0, brakingTravel);
             if (along <= brakingGap) return true;
         }
         return false;
@@ -493,8 +494,19 @@ public final class VehicleDriver {
 
         double speed = vehicle.getDeltaMovement().horizontalDistance();
         double brakingDistance = VehiclePathfinder.footprintRadius(vehicle) + 2.0
-            + speed * FOLLOW_STOPPING_TICKS;
+            + brakingTravel(speed);
         return speed > 0.1 && horizontalDistance(vehicle.position(), waypoint) <= brakingDistance;
+    }
+
+    /**
+     * Approximate travel needed for counter-input braking. The linear term
+     * covers input and engine response; the quadratic term accounts for the
+     * extra momentum carried at high SBW speed rates.
+     */
+    private static double brakingTravel(double speed) {
+        double horizontalSpeed = Math.max(0.0, speed);
+        return horizontalSpeed * FOLLOW_STOPPING_TICKS
+            + horizontalSpeed * horizontalSpeed * INERTIA_BRAKE_FACTOR;
     }
 
     private static boolean hasPassedWaypoint(Entity vehicle, Vec3 waypoint) {

@@ -233,10 +233,8 @@ public class TransportOrderMessage {
             Integer color = sender.getTeam().getColor().getColor();
             if (color != null) teamColor = (255 << 24) | color;
         }
-        boolean persistent = com.stevesarmy.squad.SquadActivityType.fromPingType(order) != null;
         List<ServerPlayer> recipients = level.getServer().getPlayerList().getPlayers().stream()
             .filter(player -> sender.getTeam() == null || player.getTeam() == sender.getTeam())
-            .filter(player -> !persistent || !player.getUUID().equals(sender.getUUID()))
             .toList();
         PingBroadcastMessage marker = new PingBroadcastMessage(order, position,
             sender.level().dimension().location().hashCode(), sender.getUUID(),

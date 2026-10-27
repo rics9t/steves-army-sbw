@@ -4,7 +4,6 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.phys.Vec3;
 
-import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -275,27 +274,10 @@ public final class SbwVehicles {
         String weaponName = getGunName(vehicle, seatIndex);
         if (weaponName == null) return false;
 
-        Method m = SbwReflection.method(vehicle.getClass(), 3, "vehicleShoot");
-        if (m != null) {
-            try {
-                Class<?> p1 = m.getParameterTypes()[1];
-                if (p1 == String.class) {
-                    m.invoke(vehicle, gunner, weaponName, targetPos);
-                    return true;
-                } else if (p1 == UUID.class) {
-                    m.invoke(vehicle, gunner, targetId, targetPos);
-                    return true;
-                }
-            } catch (Throwable ignored) {}
-        }
-        Method m2 = SbwReflection.method(vehicle.getClass(), 2, "vehicleShoot");
-        if (m2 != null) {
-            try {
-                m2.invoke(vehicle, gunner, targetPos);
-                return true;
-            } catch (Throwable ignored) {}
-        }
-        return false;
+        if (targetId != null && SbwReflection.invoke(vehicle,
+            new String[]{"vehicleShoot"}, gunner, targetId, targetPos)) return true;
+        if (SbwReflection.invoke(vehicle, new String[]{"vehicleShoot"}, gunner, weaponName, targetPos)) return true;
+        return SbwReflection.invoke(vehicle, new String[]{"vehicleShoot"}, gunner, targetPos);
     }
 
     public static void destroy(Entity vehicle) {

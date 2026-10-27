@@ -2,6 +2,7 @@ package com.stevesarmy.compat.sbw;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -14,6 +15,7 @@ public final class SbwReflection {
 
     private static final Map<String, Object> CLASSES = new ConcurrentHashMap<>();
     private static final Map<String, Object> METHODS = new ConcurrentHashMap<>();
+    private static final Map<String, Object> ARG_METHODS = new ConcurrentHashMap<>();
     private static final Map<String, Object> FIELDS = new ConcurrentHashMap<>();
 
     private SbwReflection() {
@@ -73,7 +75,7 @@ public final class SbwReflection {
 
     public static Object call(Object target, String[] names, Object... args) {
         if (target == null) return null;
-        Method m = method(target.getClass(), args.length, names);
+        Method m = methodForArguments(target.getClass(), args, false, names);
         if (m == null) return null;
         try {
             return m.invoke(target, args);
@@ -83,13 +85,103 @@ public final class SbwReflection {
     }
 
     public static Object callStatic(Class<?> owner, String[] names, Object... args) {
-        Method m = method(owner, args.length, names);
+        Method m = methodForArguments(owner, args, true, names);
         if (m == null) return null;
         try {
             return m.invoke(null, args);
         } catch (Throwable t) {
             return null;
         }
+    }
+
+    /** Invoke a possibly void method, reporting whether a compatible overload ran. */
+    public static boolean invoke(Object target, String[] names, Object... args) {
+        if (target == null) return false;
+        Method m = methodForArguments(target.getClass(), args, false, names);
+        if (m == null) return false;
+        try {
+            m.invoke(target, args);
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static Method methodForArguments(Class<?> owner, Object[] args,
+                                             boolean requireStatic, String... names) {
+        if (owner == null) return null;
+        StringBuilder key = new StringBuilder(owner.getName())
+            .append(requireStatic ? "#static#" : "#instance#");
+        for (String name : names) key.append(name).append(',');
+        key.append('(');
+        for (Object arg : args) {
+            key.append(arg == null ? "null" : arg.getClass().getName()).append(',');
+        }
+        key.append(')');
+        Object cached = ARG_METHODS.computeIfAbsent(key.toString(), ignored -> {
+            Method found = findMethodForArguments(owner, args, requireStatic, names);
+            return found == null ? MISS : found;
+        });
+        return cached == MISS ? null : (Method) cached;
+    }
+
+    private static Method findMethodForArguments(Class<?> owner, Object[] args,
+                                                 boolean requireStatic, String... names) {
+        for (String name : names) {
+            Method best = null;
+            int bestScore = Integer.MIN_VALUE;
+            for (Class<?> c = owner; c != null; c = c.getSuperclass()) {
+                for (Method candidate : c.getDeclaredMethods()) {
+                    if (!candidate.getName().equals(name)
+                        || candidate.getParameterCount() != args.length
+                        || requireStatic != Modifier.isStatic(candidate.getModifiers())) {
+                        continue;
+                    }
+                    Class<?>[] parameterTypes = candidate.getParameterTypes();
+                    int score = 0;
+                    boolean compatible = true;
+                    for (int i = 0; i < parameterTypes.length; i++) {
+                        Class<?> parameter = boxed(parameterTypes[i]);
+                        Object argument = args[i];
+                        if (argument == null) {
+                            if (parameterTypes[i].isPrimitive()) {
+                                compatible = false;
+                                break;
+                            }
+                        } else if (parameter == argument.getClass()) {
+                            score += 4;
+                        } else if (parameter.isAssignableFrom(argument.getClass())) {
+                            score += 2;
+                        } else {
+                            compatible = false;
+                            break;
+                        }
+                    }
+                    if (!compatible || score <= bestScore) continue;
+                    try {
+                        candidate.setAccessible(true);
+                        best = candidate;
+                        bestScore = score;
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+            if (best != null) return best;
+        }
+        return null;
+    }
+
+    private static Class<?> boxed(Class<?> type) {
+        if (!type.isPrimitive()) return type;
+        if (type == boolean.class) return Boolean.class;
+        if (type == byte.class) return Byte.class;
+        if (type == short.class) return Short.class;
+        if (type == int.class) return Integer.class;
+        if (type == long.class) return Long.class;
+        if (type == float.class) return Float.class;
+        if (type == double.class) return Double.class;
+        if (type == char.class) return Character.class;
+        return type;
     }
 
     public static Object get(Object target, String... names) {
@@ -114,7 +206,7 @@ public final class SbwReflection {
             String n = names[i];
             setters[i] = "set" + Character.toUpperCase(n.charAt(0)) + n.substring(1);
         }
-        Method m = method(target.getClass(), 1, setters);
+        Method m = methodForArguments(target.getClass(), new Object[]{value}, false, setters);
         if (m != null) {
             try {
                 m.invoke(target, value);
