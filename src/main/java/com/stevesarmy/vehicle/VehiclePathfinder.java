@@ -113,34 +113,7 @@ public final class VehiclePathfinder {
         }
         // Always finish on the real goal, not the snapped cell.
         result.add(exactGoal);
-        return simplifyRoute(level, from, result, halfWidth, height);
-    }
-
-    /** String-pull a coarse A* route so vehicles follow broad arcs instead of
-     * stopping and turning at every four-block grid corner. */
-    private static Deque<Vec3> simplifyRoute(Level level, BlockPos start,
-                                             Deque<Vec3> route,
-                                             double halfWidth, double height) {
-        if (route.size() < 3) return route;
-        List<Vec3> points = new ArrayList<>(route);
-        Deque<Vec3> simplified = new ArrayDeque<>();
-        BlockPos anchor = start;
-        int index = 0;
-        while (index < points.size()) {
-            int farthest = index;
-            for (int candidate = points.size() - 1; candidate > index; candidate--) {
-                if (isClearLine(level, anchor, BlockPos.containing(points.get(candidate)),
-                    halfWidth, height)) {
-                    farthest = candidate;
-                    break;
-                }
-            }
-            Vec3 point = points.get(farthest);
-            simplified.addLast(point);
-            anchor = BlockPos.containing(point);
-            index = farthest + 1;
-        }
-        return simplified;
+        return result;
     }
 
     /** Rotation-safe horizontal clearance based on the current vehicle hitbox. */

@@ -256,13 +256,15 @@ public final class SbwVehicles {
 
     public static void aimWeapon(Entity vehicle, int seatIndex, Vec3 aimVec) {
         if (!SbwCompat.isVehicle(vehicle) || isDrone(vehicle) || aimVec == null) return;
+        Class<?> utilsClass = SbwReflection.cls("com.atsuishio.superbwarfare.entity.vehicle.utils.VehicleWeaponUtils");
+        if (utilsClass == null) return;
         int turretIdx = turretControllerIndex(vehicle);
         int weaponStationIdx = passengerWeaponStationControllerIndex(vehicle);
 
         if (seatIndex == turretIdx) {
-            SbwReflection.invoke(vehicle, new String[]{"turretAutoAimFromVector"}, aimVec);
+            SbwReflection.callStatic(utilsClass, new String[]{"turretAutoAimFromVector"}, vehicle, aimVec);
         } else if (seatIndex == weaponStationIdx) {
-            SbwReflection.invoke(vehicle, new String[]{"passengerWeaponAutoAimFormVector"}, aimVec);
+            SbwReflection.callStatic(utilsClass, new String[]{"passengerWeaponAutoAimFormVector"}, vehicle, aimVec);
         }
     }
 

@@ -6,7 +6,6 @@ import com.stevesarmy.client.animation.SoldierAnimations;
 import com.stevesarmy.client.animation.ReviewedSoldierPoses;
 import com.stevesarmy.combat.GunIntegration;
 import com.stevesarmy.entity.SoldierEntity;
-import com.stevesarmy.entity.SoldierRole;
 import net.minecraft.client.animation.AnimationDefinition;
 import net.minecraft.client.animation.KeyframeAnimations;
 import net.minecraft.client.model.HierarchicalModel;
@@ -124,14 +123,6 @@ public class SoldierModel<T extends SoldierEntity> extends HumanoidModel<T> {
         weaponReady = motion.ready;
         float crawl = entity.getSwimAmount(partial);
         boolean gun = GunIntegration.isGun(entity.getMainHandItem());
-        // SBW turns its vehicle crew toward mob targets while also resetting
-        // their body from the seat transform. Rendering those competing head
-        // angles makes crew heads jitter; the turret itself carries their aim.
-        boolean sbwVehicleCrew = entity.isPassenger()
-            && entity.getRole() == SoldierRole.VEHICLE_CREW
-            && com.stevesarmy.compat.sbw.SbwCompat.isVehicle(entity.getVehicle());
-        float aimYaw = sbwVehicleCrew ? 0.0F : yaw;
-        float aimPitch = sbwVehicleCrew ? 0.0F : pitch;
         float trackingYawLimit = entity.isPassenger() ? 75.0F : 30.0F;
         if (entity.deathTime > 0) {
             apply((entity.getId() & 1) == 0 ? SoldierAnimations.UNIT_DEATH : SoldierAnimations.UNIT_DEATH_BACK,
@@ -139,8 +130,8 @@ public class SoldierModel<T extends SoldierEntity> extends HumanoidModel<T> {
         } else {
             apply(SoldierAnimations.UNIT_IDLE, age / 20, 1 - motion.walk);
             applyLocomotion(swing, speed, motion.walk * (1 - crawl));
-            head.yRot += Mth.clamp(aimYaw, -trackingYawLimit, trackingYawLimit) * Mth.DEG_TO_RAD;
-            head.xRot += Mth.clamp(aimPitch, -25, 45) * Mth.DEG_TO_RAD;
+            head.yRot += Mth.clamp(yaw, -trackingYawLimit, trackingYawLimit) * Mth.DEG_TO_RAD;
+            head.xRot += Mth.clamp(pitch, -25, 45) * Mth.DEG_TO_RAD;
             if (gun) {
                 String id = entity.getMainHandItem().getTag() == null ? "" : entity.getMainHandItem().getTag().getString("GunId");
                 if (!id.equals(motion.gunId)) { motion.gunId = id; motion.gunType = weaponType(entity); }
@@ -152,7 +143,7 @@ public class SoldierModel<T extends SoldierEntity> extends HumanoidModel<T> {
                 rightArm.yRot = leftArm.yRot = rightArm.zRot = leftArm.zRot = 0;
             }
             applyReviewedPosture(motion.crouch * (1 - crawl), motion.coverAim,
-                motion.ready, swing, speed, gun, aimYaw, aimPitch, trackingYawLimit);
+                motion.ready, swing, speed, gun, yaw, pitch, trackingYawLimit);
             applyLocomotion(swing, speed, motion.walk * (1 - crawl) * (1 - motion.crouch));
             applyCrawl(crawl, swing, speed, pitch, gun);
             reviewedWeaponWeight = 1 - crawl;

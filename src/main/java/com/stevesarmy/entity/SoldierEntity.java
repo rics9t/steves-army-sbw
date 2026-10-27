@@ -1515,11 +1515,6 @@ public class SoldierEntity extends PathfinderMob implements Container {
     }
 
     public void tick() {
-        // Clear a saved crawl/prone state before vanilla or our crawl-facing
-        // update can interpret the vehicle's movement as the soldier crawling.
-        if (!this.level().isClientSide && isMountedInSbwVehicle()) {
-            clearMountedProneState();
-        }
         if (!this.level().isClientSide) {
             movementController.beginTick();
             travelCrawl.tick();
@@ -1553,7 +1548,14 @@ public class SoldierEntity extends PathfinderMob implements Container {
         // while riding an SBW vehicle so old combat/cover plans cannot make a
         // seated soldier lie across the vehicle model.
         if (isMountedInSbwVehicle()) {
-            clearMountedProneState();
+            firingProne = false;
+            if (entityData.get(LOW_CROUCHING)) {
+                entityData.set(LOW_CROUCHING, false);
+            }
+            if (getPose() == Pose.SWIMMING) {
+                setPose(Pose.STANDING);
+                refreshDimensions();
+            }
         }
 
         // Enforce the server-synced posture every tick to fight vanilla pose overrides.
@@ -2688,7 +2690,7 @@ public BlockPos getPingMoveTarget() {
     }
 
     private void updateCrawlFacing() {
-        if (isMountedInSbwVehicle() || !isCrawlMoving()) {
+        if (!isCrawlMoving()) {
             return;
         }
 
@@ -2702,17 +2704,6 @@ public BlockPos getPingMoveTarget() {
         this.setYHeadRot(bodyYaw);
         traceRotationWrite("crawl-facing", previousYaw, previousBodyYaw, previousHeadYaw,
             "movement=" + formatVec(getDeltaMovement()) + ", targetYaw=" + formatAngle(movementYaw));
-    }
-
-    private void clearMountedProneState() {
-        firingProne = false;
-        if (entityData.get(LOW_CROUCHING)) {
-            entityData.set(LOW_CROUCHING, false);
-        }
-        if (getPose() == Pose.SWIMMING) {
-            setPose(Pose.STANDING);
-            refreshDimensions();
-        }
     }
 
     /** Records a mod-owned yaw write when this soldier is the active rotation trace target. */

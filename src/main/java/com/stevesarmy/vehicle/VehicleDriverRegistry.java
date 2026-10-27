@@ -44,10 +44,7 @@ public final class VehicleDriverRegistry {
     }
 
     public static void remove(Entity vehicle) {
-        if (vehicle != null) {
-            DRIVERS.remove(vehicle.getUUID());
-            VehicleWeaponController.forget(vehicle);
-        }
+        if (vehicle != null) DRIVERS.remove(vehicle.getUUID());
     }
 
     public static List<VehicleDriver> all() {
