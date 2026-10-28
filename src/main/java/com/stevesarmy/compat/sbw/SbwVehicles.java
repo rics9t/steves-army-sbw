@@ -186,9 +186,10 @@ public final class SbwVehicles {
     }
 
     /** Select a weapon from this seat's own weapon list (never another seat's gun). */
-    public static void setWeaponIndex(Entity vehicle, int seatIndex, int weaponIndex) {
-        if (!SbwCompat.isVehicle(vehicle) || isDrone(vehicle) || weaponIndex < 0) return;
-        SbwReflection.call(vehicle, new String[]{"setWeaponIndex"}, seatIndex, weaponIndex);
+    public static boolean setWeaponIndex(Entity vehicle, int seatIndex, int weaponIndex) {
+        if (!SbwCompat.isVehicle(vehicle) || isDrone(vehicle) || weaponIndex < 0) return false;
+        SbwReflection.invoke(vehicle, new String[]{"setWeaponIndex"}, seatIndex, weaponIndex);
+        return weaponIndex(vehicle, seatIndex) == weaponIndex;
     }
 
     public static boolean weaponReloading(Entity vehicle, int seatIndex, int weaponIndex) {

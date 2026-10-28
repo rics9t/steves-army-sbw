@@ -652,7 +652,8 @@ public class SoldierEntity extends PathfinderMob implements Container {
 
     /** True when this role should never peek from cover. Override for roles like support. */
     public boolean isPeekDisabled() {
-        return false;
+        return threatAwareness.hasActiveArmoredVehicleThreat()
+            && !com.stevesarmy.combat.ArmorRoleManager.isArmorHunter(this);
     }
 
     /** True while the vehicle crew goal holds a station (hull MG / periscope). */
@@ -1706,6 +1707,11 @@ public class SoldierEntity extends PathfinderMob implements Container {
         long gameTime = level().getGameTime();
         if (com.stevesarmy.compat.sbw.SbwCompat.hasVehicles()) {
             com.stevesarmy.compat.sbw.SbwCompat.tickVehicle(this);
+            if (!isPassenger()) {
+                // Keep tank cover awareness active even while no infantry target
+                // is visible and SoldierCombatGoal would otherwise be asleep.
+                com.stevesarmy.combat.ArmorThreatScanner.maybeScan(this);
+            }
         }
         Entity sbwVehicle = getVehicle();
         if (com.stevesarmy.compat.sbw.SbwCompat.hasVehicles()

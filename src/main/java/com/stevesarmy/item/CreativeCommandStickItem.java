@@ -71,8 +71,8 @@ public class CreativeCommandStickItem extends CommandStickItem {
     }
 
     /**
-     * Creative only: a ship click mounts selected friendly or hostile vehicle crew.
-     * Other shift-clicks retain this stick's normal reposition behavior.
+     * Creative only: a vehicle or ship click assigns every selected soldier,
+     * including enemy infantry. Other shift-clicks retain normal repositioning.
      */
     private static boolean tryAssignCrew(Player player) {
         if (!player.getAbilities().instabuild) return false;

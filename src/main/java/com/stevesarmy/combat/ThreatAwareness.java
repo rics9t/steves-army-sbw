@@ -305,6 +305,18 @@ public class ThreatAwareness {
         return !threats.isEmpty();
     }
 
+    /** True while a recently observed hostile tank is still a live cover threat. */
+    public boolean hasActiveArmoredVehicleThreat() {
+        long now = GameClock.nowMs();
+        for (ThreatEntry threat : threats) {
+            if (threat.source == ThreatSource.ARMORED_VEHICLE
+                && now - threat.lastObservedTime <= ARMORED_VEHICLE_MEMORY_MS) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public int getActiveThreatCount() {
         return threats.size();
     }

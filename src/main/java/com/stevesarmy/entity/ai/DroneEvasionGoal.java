@@ -2,7 +2,12 @@ package com.stevesarmy.entity.ai;
 
 import com.stevesarmy.compat.sbw.SbwCompat;
 import com.stevesarmy.compat.sbw.SbwVehicles;
+import com.stevesarmy.combat.ArmorRoleManager;
+import com.stevesarmy.combat.FriendlyFireChecker;
+import com.stevesarmy.combat.GunIntegration;
+import com.stevesarmy.combat.VisibilityRay;
 import com.stevesarmy.entity.SoldierEntity;
+import net.minecraft.util.Mth;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.ai.goal.Goal;
@@ -15,8 +20,9 @@ import java.util.List;
 
 /** Makes dismounted soldiers create distance from hostile SBW drones. */
 public final class DroneEvasionGoal extends Goal {
-    private static final double START_RADIUS = 14.0;
-    private static final double CONTINUE_RADIUS = 19.0;
+    private static final double START_RADIUS = 24.0;
+    private static final double CONTINUE_RADIUS = 30.0;
+    private static final double FIRE_RANGE = 36.0;
     private static final double FLEE_DISTANCE = 10.0;
     private static final double SPEED = 1.2;
     private static final int REPATH_TICKS = 12;
@@ -25,6 +31,7 @@ public final class DroneEvasionGoal extends Goal {
     private final SoldierEntity soldier;
     private Entity drone;
     private int repathIn;
+    private int nextShotTick;
 
     public DroneEvasionGoal(SoldierEntity soldier) {
         this.soldier = soldier;
@@ -58,6 +65,7 @@ public final class DroneEvasionGoal extends Goal {
         }
         if (drone == null) return;
         soldier.getLookControl().setLookAt(drone, 30.0F, 30.0F);
+        shootAtDrone();
         if (--repathIn <= 0) moveAway();
     }
 
@@ -69,9 +77,44 @@ public final class DroneEvasionGoal extends Goal {
 
     private boolean eligible() {
         return soldier.isAlive() && !soldier.isPassenger()
-            && soldier.getRole() != com.stevesarmy.entity.SoldierRole.VEHICLE_CREW
             && !soldier.isVehicleCrewActive() && !soldier.isCrewSeated()
             && SbwCompat.hasVehicles();
+    }
+
+    private void shootAtDrone() {
+        if (drone == null || soldier.distanceToSqr(drone) > FIRE_RANGE * FIRE_RANGE
+            || !GunIntegration.isAnyGunLoaded() || !GunIntegration.hasGun(soldier)
+            || ArmorRoleManager.isAtGunStack(soldier.getMainHandItem())) return;
+
+        Vec3 aimPoint = drone.getBoundingBox().getCenter().add(drone.getDeltaMovement().scale(3.0));
+        Vec3 eye = soldier.getEyePosition();
+        if (!VisibilityRay.trace(soldier.level(), eye, aimPoint, soldier).hasContact()) return;
+        GunIntegration.aim(soldier, true);
+        if (GunIntegration.isDrawing(soldier) || GunIntegration.isReloading(soldier)
+            || GunIntegration.isBolting(soldier)) return;
+        if (GunIntegration.getCurrentAmmo(soldier) <= 0) {
+            if (GunIntegration.canReload(soldier)) GunIntegration.reload(soldier);
+            return;
+        }
+
+        Vec3 toDrone = aimPoint.subtract(eye);
+        double horizontal = Math.sqrt(toDrone.x * toDrone.x + toDrone.z * toDrone.z);
+        float yaw = (float) Math.toDegrees(Math.atan2(-toDrone.x, toDrone.z));
+        float pitch = (float) -Math.toDegrees(Math.atan2(toDrone.y, Math.max(0.01, horizontal)));
+        if (Math.abs(Mth.wrapDegrees(yaw - soldier.getYHeadRot())) > 12.0f
+            || Math.abs(pitch - soldier.getXRot()) > 16.0f
+            || !FriendlyFireChecker.isSafeToShoot(soldier, aimPoint, 0.7f)
+            || soldier.tickCount < nextShotTick) return;
+
+        nextShotTick = soldier.tickCount + 5;
+        switch (GunIntegration.shootAtPosition(soldier, aimPoint)) {
+            case NO_AMMO -> {
+                if (GunIntegration.canReload(soldier)) GunIntegration.reload(soldier);
+            }
+            case NEED_BOLT -> GunIntegration.bolt(soldier);
+            case NOT_DRAWN -> GunIntegration.draw(soldier);
+            default -> {}
+        }
     }
 
     private Entity nearestHostileDrone(double radius) {

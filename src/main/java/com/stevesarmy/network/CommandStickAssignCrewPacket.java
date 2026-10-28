@@ -4,6 +4,7 @@ import com.stevesarmy.StevesArmyMod;
 import com.stevesarmy.compat.SbwCompat;
 import com.stevesarmy.compat.VS2Compat;
 import com.stevesarmy.compat.sbw.SbwVehicles;
+import com.stevesarmy.entity.EnemySoldierEntity;
 import com.stevesarmy.entity.SoldierEntity;
 import com.stevesarmy.entity.SoldierRole;
 import com.stevesarmy.item.CreativeCommandStickItem;
@@ -24,8 +25,10 @@ import java.util.List;
 import java.util.function.Supplier;
 
 /**
- * Crew assign stick: assign the client-selected crew to free seats on the ship under
- * the clicked block. The server re-validates the held item and every crew id, resolves
+ * Crew assign stick: assign the client-selected soldiers to free seats on the
+ * clicked vehicle or ship. The dedicated crew stick is restricted to owned crew;
+ * the creative command stick can assign any selected soldier, including enemies.
+ * The server re-validates the held item and every soldier id, resolves
  * the ship from the anchor (crosshair ship first, else the ship near the player), and
  * seats crew through the shared infantry MOUNT machinery ({@link CrewAssignment}) —
  * the soldier flow: ship + anchor position, never a specific seat entity.
@@ -115,9 +118,14 @@ public class CommandStickAssignCrewPacket {
                     return;
                 }
                 int boarding = CrewAssignment.mountCrewOnVehicle(level, vehicle, vehicleCrew);
-                StevesArmyMod.LOGGER.info("[CrewStick] vehicle assign: vehicle={} type={} crew={}/{} boarding={}",
+                StevesArmyMod.LOGGER.info("[CrewStick] vehicle assign: vehicle={} type={} soldiers={}/{} selected={} requestsAccepted={}",
                     vehicle.getId(), SbwCompat.getVehicleTypeName(vehicle),
-                    vehicleCrew.size(), msg.crewIds.size(), boarding);
+                    vehicleCrew.size(), msg.crewIds.size(),
+                    vehicleCrew.stream().map(soldier -> soldier.getId() + ":"
+                        + soldier.getName().getString() + "[enemy="
+                        + (soldier instanceof EnemySoldierEntity) + ",owned="
+                        + soldier.isOwnedBy(sender) + "]").toList(),
+                    boarding);
                 sender.displayClientMessage(
                     Component.translatable("transport.steves_army.feedback.crew_assigned", boarding, vehicleCrew.size()), true);
                 return;

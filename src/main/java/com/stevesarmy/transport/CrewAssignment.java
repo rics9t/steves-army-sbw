@@ -4,11 +4,15 @@ import com.stevesarmy.StevesArmyConfig;
 import com.stevesarmy.StevesArmyMod;
 import com.stevesarmy.compat.AnalogWarfareCompat;
 import com.stevesarmy.compat.SbwCompat;
+import com.stevesarmy.compat.sbw.SbwVehicles;
 import com.stevesarmy.compat.VS2Compat;
 import com.stevesarmy.combat.StationGunnerAI;
+import com.stevesarmy.entity.EnemySoldierEntity;
 import com.stevesarmy.entity.SoldierEntity;
 import com.stevesarmy.entity.SoldierRole;
 import com.stevesarmy.vehicle.VehicleBoardingManager;
+import com.stevesarmy.vehicle.VehicleDriverRegistry;
+import com.stevesarmy.vehicle.VehicleMountPolicy;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -155,12 +159,12 @@ public final class CrewAssignment {
     /**
      * Seats crew on a plain world-space vehicle entity (Superb Warfare), the
      * entity analogue of {@link #mountCrewOnShip}: capacity is the vehicle's JSON
-     * seat count, the first crew member reserves the driver seat when it is free,
-     * and the remaining crew reserve passenger seats. Crew walk to the hull and
-     * board on arrival. No handle/contraption tiers — an SBW vehicle has one
-     * seating system.
+     * seat count, the first crew member takes the driver seat when it is free,
+     * and other soldiers take passenger seats. Nearby soldiers mount immediately;
+     * distant soldiers walk up to their reserved seats. No handle/contraption
+     * tiers — an SBW vehicle has one seating system.
      *
-     * @return the number of crew seated
+     * @return soldiers mounted immediately or given an active walk-up order
      */
     public static int mountCrewOnVehicle(ServerLevel level, Entity vehicle,
                                          List<SoldierEntity> crew) {
@@ -173,8 +177,27 @@ public final class CrewAssignment {
                 break;
             }
             prepareForMount(soldier);
+            if (VehicleMountPolicy.canBoard(soldier, vehicle)
+                && isCloseEnoughToMount(soldier, vehicle)) {
+                boolean vehicleCrew = soldier.getRole() == SoldierRole.VEHICLE_CREW;
+                int wanted = vehicleCrew && SbwVehicles.passengerAt(vehicle, 0) == null
+                    ? 0 : SbwCompat.firstFreePassengerSeat(vehicle);
+                if (wanted >= 0 && VS2Compat.seatSoldierOnEntityAtSeat(soldier, vehicle, wanted)) {
+                    soldier.clearAttackTarget();
+                    soldier.setTarget(null);
+                    if (wanted == 0) VehicleDriverRegistry.onBoarded(soldier, vehicle);
+                    seatedCount++;
+                    StevesArmyMod.LOGGER.info("[CrewStick] mounted soldier={} name='{}' enemy={} vehicle={} seat={}",
+                        soldier.getId(), soldier.getName().getString(),
+                        soldier instanceof EnemySoldierEntity, vehicle.getId(), wanted);
+                    continue;
+                }
+            }
             if (VehicleBoardingManager.requestBoard(soldier, vehicle)) {
                 seatedCount++;
+                StevesArmyMod.LOGGER.info("[CrewStick] boarding queued soldier={} name='{}' enemy={} vehicle={}",
+                    soldier.getId(), soldier.getName().getString(),
+                    soldier instanceof EnemySoldierEntity, vehicle.getId());
             }
         }
         if (seatedCount < crew.size()) {
@@ -183,6 +206,15 @@ public final class CrewAssignment {
                 SbwCompat.getVehicleTypeName(vehicle));
         }
         return seatedCount;
+    }
+
+    private static boolean isCloseEnoughToMount(SoldierEntity soldier, Entity vehicle) {
+        AABB hull = vehicle.getBoundingBox();
+        double x = soldier.getX();
+        double z = soldier.getZ();
+        double dx = Math.max(Math.max(hull.minX - x, 0.0), x - hull.maxX);
+        double dz = Math.max(Math.max(hull.minZ - z, 0.0), z - hull.maxZ);
+        return dx * dx + dz * dz <= 64.0 && Math.abs(soldier.getY() - vehicle.getY()) <= 4.0;
     }
 
     /** Seat one crew member on a static SeatBlock via SeatBlock.sitDown (the infantry MOUNT path). */

@@ -56,7 +56,8 @@ public final class SbwVehicleGunnery {
             && seat == SbwVehicles.passengerWeaponStationControllerIndex(mount)
             && SbwVehicles.seatHasWeapon(mount, seat)
             && !SbwVehicles.seatHasLoadedWeapon(mount, seat)
-            && SbwVehicles.seatAllowsRifleWhenWeaponEmpty(mount, seat);
+            && SbwVehicles.seatAllowsRifleWhenWeaponEmpty(mount, seat)
+            && !SbwVehicles.hidesPassenger(mount, soldier);
         if (emptyPassengerStation) {
             // Let rifle targeting own this soldier while the station is empty;
             // otherwise the station muzzle target can repeatedly replace a target
@@ -95,12 +96,12 @@ public final class SbwVehicleGunnery {
         }
 
         if (seat >= 0) {
-            // Keep the Mob target for SBW's native fire/cooldown checks, but
-            // clear SBW's UUID auto-aim so our controller can add a small,
-            // bounded aiming drift instead of resetting the exact bearing each tick.
-            SbwVehicles.syncAutoTarget(mount, seat, null);
+            // SBW's vehicle tick resolves this UUID and computes the firing
+            // solution from its actual barrel transform. Clearing it here
+            // disabled that path and made our old per-soldier vector steering
+            // fight the vehicle tick, which could leave the turret stationary.
+            SbwVehicles.syncAutoTarget(mount, seat, current);
             VehicleWeaponController.tickMounted(soldier, mount, seat, current);
-
         }
     }
 

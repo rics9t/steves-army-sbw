@@ -270,7 +270,8 @@ public final class ArmorThreatScanner {
                     BlockPos.containing(hullCenter), hullCenter, velocity, corners,
                     0.8f, serverLevel, vehicleClass);
 
-                if (SbwVehicles.hasButtonedUpCrewWithoutVisibleGunner(soldier, vehicle)) {
+                if ("TANK".equals(SbwCompat.getVehicleTypeName(vehicle))
+                    || SbwVehicles.hasButtonedUpCrewWithoutVisibleGunner(soldier, vehicle)) {
                     soldier.getThreatAwareness().onArmoredVehicleObserved(
                         vehicle.getUUID(), BlockPos.containing(hullCenter));
                 }

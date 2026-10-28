@@ -26,7 +26,8 @@ public final class MountedSoldierGunnery {
         boolean emptyWeaponFallback = seat >= 0
             && SbwVehicles.seatHasWeapon(vehicle, seat)
             && !SbwVehicles.seatHasLoadedWeapon(vehicle, seat)
-            && SbwVehicles.seatAllowsRifleWhenWeaponEmpty(vehicle, seat);
+            && SbwVehicles.seatAllowsRifleWhenWeaponEmpty(vehicle, seat)
+            && !SbwVehicles.hidesPassenger(vehicle, soldier);
         if (seat < 0 || SbwVehicles.isDriver(vehicle, soldier)
             || (!SbwVehicles.seatAllowsHandheld(vehicle, seat) && !emptyWeaponFallback)
             || !GunIntegration.isAnyGunLoaded() || !GunIntegration.hasGun(soldier)
