@@ -3,6 +3,7 @@ package com.stevesarmy.combat;
 import com.stevesarmy.StevesArmyConfig;
 import com.stevesarmy.StevesArmyMod;
 import com.stevesarmy.compat.SbwCompat;
+import com.stevesarmy.compat.sbw.SbwVehicles;
 import com.stevesarmy.compat.TallyhoCompat;
 import com.stevesarmy.compat.VS2Compat;
 import com.stevesarmy.debug.DiagnosticLogManager;
@@ -268,6 +269,11 @@ public final class ArmorThreatScanner {
                 intel.reportHardTarget(soldier.getUUID(), contactId,
                     BlockPos.containing(hullCenter), hullCenter, velocity, corners,
                     0.8f, serverLevel, vehicleClass);
+
+                if (SbwVehicles.hasButtonedUpCrewWithoutVisibleGunner(soldier, vehicle)) {
+                    soldier.getThreatAwareness().onArmoredVehicleObserved(
+                        vehicle.getUUID(), BlockPos.containing(hullCenter));
+                }
 
                 double distSqr = soldier.distanceToSqr(hullCenter);
                 if (nearest == null || distSqr < soldier.distanceToSqr(nearest.aimPoint())) {

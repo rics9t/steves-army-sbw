@@ -69,7 +69,7 @@ public final class CrewSeatInteractHandler {
             && mainHand.getItem() instanceof CreativeCommandStickItem
             && player.isShiftKeyDown()) {
             if (event.getLevel().isClientSide && player.getAbilities().instabuild) {
-                CrewAssignStickItem.tryAssign(player, false, true);
+                CrewAssignStickItem.tryAssignVehicle(player, target, false, true);
             }
             event.setCanceled(true);
             event.setCancellationResult(InteractionResult.SUCCESS);

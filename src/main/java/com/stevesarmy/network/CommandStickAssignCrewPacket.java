@@ -3,6 +3,7 @@ package com.stevesarmy.network;
 import com.stevesarmy.StevesArmyMod;
 import com.stevesarmy.compat.SbwCompat;
 import com.stevesarmy.compat.VS2Compat;
+import com.stevesarmy.compat.sbw.SbwVehicles;
 import com.stevesarmy.entity.SoldierEntity;
 import com.stevesarmy.entity.SoldierRole;
 import com.stevesarmy.item.CreativeCommandStickItem;
@@ -99,7 +100,9 @@ public class CommandStickAssignCrewPacket {
             // drop as "no ship at anchor" below).
             if (msg.vehicleEntityId > 0) {
                 Entity vehicle = level.getEntity(msg.vehicleEntityId);
-                if (vehicle == null || !SbwCompat.isOperational(vehicle)) {
+                if (vehicle == null || !SbwCompat.isOperational(vehicle)
+                    || SbwVehicles.isDrone(vehicle)
+                    || sender.distanceToSqr(vehicle) > 100.0) {
                     sender.displayClientMessage(
                         Component.translatable("transport.steves_army.feedback.no_vehicle"), true);
                     return;

@@ -51,6 +51,20 @@ public final class SbwVehicleGunnery {
         if (!SbwCompat.isOperational(mount)) {
             return;
         }
+        int seat = SbwVehicles.seatIndexOf(mount, soldier);
+        boolean emptyPassengerStation = seat >= 0
+            && seat == SbwVehicles.passengerWeaponStationControllerIndex(mount)
+            && SbwVehicles.seatHasWeapon(mount, seat)
+            && !SbwVehicles.seatHasLoadedWeapon(mount, seat)
+            && SbwVehicles.seatAllowsRifleWhenWeaponEmpty(mount, seat);
+        if (emptyPassengerStation) {
+            // Let rifle targeting own this soldier while the station is empty;
+            // otherwise the station muzzle target can repeatedly replace a target
+            // that is visible to the rifleman but not from inside the hull.
+            SbwVehicles.syncAutoTarget(mount, seat, null);
+            MountedSoldierGunnery.tickMounted(soldier);
+            return;
+        }
         long gameTime = serverLevel.getGameTime();
         UUID soldierId = soldier.getUUID();
 
@@ -80,10 +94,13 @@ public final class SbwVehicleGunnery {
             }
         }
 
-        int seat = SbwVehicles.seatIndexOf(mount, soldier);
         if (seat >= 0) {
-            SbwVehicles.syncAutoTarget(mount, seat, current);
+            // Keep the Mob target for SBW's native fire/cooldown checks, but
+            // clear SBW's UUID auto-aim so our controller can add a small,
+            // bounded aiming drift instead of resetting the exact bearing each tick.
+            SbwVehicles.syncAutoTarget(mount, seat, null);
             VehicleWeaponController.tickMounted(soldier, mount, seat, current);
+
         }
     }
 

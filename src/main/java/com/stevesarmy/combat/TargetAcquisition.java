@@ -1,6 +1,8 @@
 package com.stevesarmy.combat;
 
 import com.stevesarmy.StevesArmyConfig;
+import com.stevesarmy.compat.sbw.SbwCompat;
+import com.stevesarmy.compat.sbw.SbwVehicles;
 import net.minecraft.core.BlockPos;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.LivingEntity;
@@ -196,6 +198,11 @@ public class TargetAcquisition {
         if (!target.isAlive()) return false;
         if (target.isSpectator()) return false;
         if (target instanceof Player player && player.isCreative()) return false;
+        // SBW hides selected passengers at render time and protects them inside
+        // the vehicle. Keep those riders out of the rifle target pool too;
+        // otherwise infantry repeatedly fires at an entity its bullets cannot hit.
+        net.minecraft.world.entity.Entity mount = target.getVehicle();
+        if (SbwCompat.isVehicle(mount) && SbwVehicles.hidesPassenger(mount, target)) return false;
         return true;
     }
     

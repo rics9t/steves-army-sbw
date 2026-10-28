@@ -3,6 +3,7 @@ package com.stevesarmy.compat.sbw;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.phys.Vec3;
+import com.stevesarmy.entity.SoldierEntity;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -24,6 +25,16 @@ public final class SbwVehicles {
         if (entity == null) return false;
         String name = entity.getClass().getName();
         return name.contains("DroneEntity") || name.contains(".drone.") || name.endsWith(".DroneEntity");
+    }
+
+    /** A drone is hostile when its controller is hostile; an unlinked drone is treated as a threat. */
+    public static boolean isHostileDrone(SoldierEntity soldier, Entity drone) {
+        if (soldier == null || !isDrone(drone)) return false;
+        Object controller = SbwReflection.call(drone, new String[]{"getController"});
+        if (controller instanceof LivingEntity living && living.isAlive()) {
+            return !soldier.isFriendlyTo(living) && soldier.isProactiveTarget(living);
+        }
+        return true;
     }
 
     // -- capacity and seating -------------------------------------------------
@@ -94,6 +105,19 @@ public final class SbwVehicles {
         return !SbwReflection.asBool(ban, false) && !seatHasWeapon(vehicle, seatIndex);
     }
 
+    /**
+     * Whether a seated soldier may use its own rifle after that seat's mounted
+     * weapon runs out. SBW's normal hand-use check also rejects every seat with
+     * a mounted weapon, even when it is empty; for fallback fire only BanHand
+     * should continue to block the rifle.
+     */
+    public static boolean seatAllowsRifleWhenWeaponEmpty(Entity vehicle, int seatIndex) {
+        Object seat = seatInfo(vehicle, seatIndex);
+        if (seat == null) return false;
+        Object ban = SbwReflection.get(seat, "banHand", "getBanHand", "isBanHand");
+        return !SbwReflection.asBool(ban, false);
+    }
+
     /** Weapon station names available to the given seat, possibly empty. */
     @SuppressWarnings("unchecked")
     public static List<String> seatWeapons(Entity vehicle, int seatIndex) {
@@ -112,6 +136,35 @@ public final class SbwVehicles {
 
     public static boolean seatHasWeapon(Entity vehicle, int seatIndex) {
         return !seatWeapons(vehicle, seatIndex).isEmpty();
+    }
+
+    /** Hide flag used by SBW's RenderPlayerEvent.Pre handler for this rider. */
+    public static boolean hidesPassenger(Entity vehicle, Entity passenger) {
+        if (!SbwCompat.isVehicle(vehicle) || passenger == null || isDrone(vehicle)) return false;
+        return SbwReflection.asBool(
+            SbwReflection.call(vehicle, new String[]{"hidePassenger"}, passenger), false);
+    }
+
+    /**
+     * A buttoned-up tank with hidden crew in seats 0/1 and no exposed gunner
+     * in seat 2 is a cover threat for infantry. They cannot hit the riders with
+     * rifles, so their response should be cover or anti-armor weapons.
+     */
+    public static boolean hasButtonedUpCrewWithoutVisibleGunner(SoldierEntity observer, Entity vehicle) {
+        if (!SbwCompat.isVehicle(vehicle) || isDrone(vehicle)) return false;
+
+        Entity exposedGunner = passengerAt(vehicle, 2);
+        if (exposedGunner != null && exposedGunner.isAlive()
+            && !hidesPassenger(vehicle, exposedGunner)) return false;
+
+        for (int seat = 0; seat < 2; seat++) {
+            Entity passenger = passengerAt(vehicle, seat);
+            if (passenger instanceof LivingEntity living && living.isAlive()
+                && !observer.isFriendlyTo(living) && hidesPassenger(vehicle, passenger)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public static boolean seatAllowsHeadRotation(Entity vehicle, int seatIndex) {
@@ -157,6 +210,23 @@ public final class SbwVehicles {
         Object ammo = SbwReflection.call(vehicle, new String[]{"getAmmoCount"}, weapons.get(weaponIndex));
         return SbwReflection.asInt(ammo, weaponIndex == weaponIndex(vehicle, seatIndex)
             ? ammoCount(vehicle, seatIndex) : 0) > 0;
+    }
+
+    /** Ammo test that does not treat a short firing cooldown as an empty weapon. */
+    public static boolean weaponHasAmmo(Entity vehicle, int seatIndex, int weaponIndex) {
+        List<String> weapons = seatWeapons(vehicle, seatIndex);
+        if (weaponIndex < 0 || weaponIndex >= weapons.size()) return false;
+        Object ammo = SbwReflection.call(vehicle, new String[]{"getAmmoCount"}, weapons.get(weaponIndex));
+        int fallback = weaponIndex == weaponIndex(vehicle, seatIndex) ? ammoCount(vehicle, seatIndex) : 0;
+        return SbwReflection.asInt(ammo, fallback) > 0;
+    }
+
+    /** Whether the currently selected weapon in a seat has ammunition available. */
+    public static boolean seatHasLoadedWeapon(Entity vehicle, int seatIndex) {
+        int selected = weaponIndex(vehicle, seatIndex);
+        if (selected < 0) selected = 0;
+        return weaponHasAmmo(vehicle, seatIndex, selected)
+            || weaponReady(vehicle, seatIndex, selected);
     }
 
     // -- health & fuel --------------------------------------------------------
@@ -279,6 +349,12 @@ public final class SbwVehicles {
         if (isDrone(vehicle)) return vehicle.position();
         Object res = SbwReflection.call(vehicle, new String[]{"getShootPos"}, seatIndex, 1.0f);
         return res instanceof Vec3 v ? v : vehicle.position();
+    }
+
+    public static float projectileVelocity(Entity vehicle, int seatIndex) {
+        if (isDrone(vehicle)) return 30.0f;
+        return SbwReflection.asFloat(
+            SbwReflection.call(vehicle, new String[]{"getProjectileVelocity"}, seatIndex), 30.0f);
     }
 
     public static void aimWeapon(Entity vehicle, int seatIndex, Vec3 aimVec) {

@@ -76,6 +76,7 @@ public class CreativeCommandStickItem extends CommandStickItem {
      */
     private static boolean tryAssignCrew(Player player) {
         if (!player.getAbilities().instabuild) return false;
+        if (CrewAssignStickItem.tryAssignAimedVehicle(player, false, true)) return true;
         HitResult hit = player.pick(6.0, 1.0F, false);
         if (hit.getType() == HitResult.Type.ENTITY && hit instanceof EntityHitResult entityHit
             && SbwCompat.isOperational(entityHit.getEntity())

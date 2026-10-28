@@ -23,8 +23,12 @@ public final class MountedSoldierGunnery {
         if (!SbwCompat.isVehicle(vehicle) || SbwVehicles.isDrone(vehicle)) return;
 
         int seat = SbwVehicles.seatIndexOf(vehicle, soldier);
+        boolean emptyWeaponFallback = seat >= 0
+            && SbwVehicles.seatHasWeapon(vehicle, seat)
+            && !SbwVehicles.seatHasLoadedWeapon(vehicle, seat)
+            && SbwVehicles.seatAllowsRifleWhenWeaponEmpty(vehicle, seat);
         if (seat < 0 || SbwVehicles.isDriver(vehicle, soldier)
-            || !SbwVehicles.seatAllowsHandheld(vehicle, seat)
+            || (!SbwVehicles.seatAllowsHandheld(vehicle, seat) && !emptyWeaponFallback)
             || !GunIntegration.isAnyGunLoaded() || !GunIntegration.hasGun(soldier)
             || ArmorRoleManager.isAtGunStack(soldier.getMainHandItem())) {
             soldier.setTarget(null);
