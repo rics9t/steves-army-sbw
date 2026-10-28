@@ -156,14 +156,14 @@ public class CommandStickAssignCrewPacket {
         ctx.get().setPacketHandled(true);
     }
 
-    /** Re-validates the client's crew ids: role, ownership, and de-duplication. */
+    /** Re-validates client ids: normal crew tools require crew roles; creative may board any soldier. */
     private static List<SoldierEntity> resolvePermittedCrew(ServerLevel level, List<Integer> crewIds,
                                                             ServerPlayer sender, boolean creativeCrewTool) {
         List<SoldierEntity> crew = new ArrayList<>();
         for (int id : crewIds) {
             Entity entity = level.getEntity(id);
             if (entity instanceof SoldierEntity soldier
-                && soldier.getRole() == SoldierRole.VEHICLE_CREW
+                && (creativeCrewTool || soldier.getRole() == SoldierRole.VEHICLE_CREW)
                 && (creativeCrewTool || soldier.isOwnedBy(sender))
                 && !crew.contains(soldier)) {
                 crew.add(soldier);

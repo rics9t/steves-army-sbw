@@ -77,9 +77,16 @@ public class CrewAssignStickItem extends CommandStickItem {
      * vehicle id — ships go through the block anchor as before.
      */
     public static boolean tryAssign(Player player, boolean requireOwnership) {
+        return tryAssign(player, requireOwnership, false);
+    }
+
+    /** Creative Command Stick may board any selected soldier, including hostile infantry. */
+    public static boolean tryAssign(Player player, boolean requireOwnership, boolean includeNonCrew) {
         BlockHitResult hit = findAimHit(player);
         Vec3 anchor = hit == null ? null : hit.getLocation();
-        List<Integer> selected = selectedVehicleCrewIds(player, requireOwnership);
+        List<Integer> selected = includeNonCrew
+            ? selectedSoldierIds(player, requireOwnership)
+            : selectedVehicleCrewIds(player, requireOwnership);
         int vehicleEntityId = aimedVehicleId(player);
         StevesArmyMod.LOGGER.info("[CrewStick] assign click: anchor={} block={} vehicle={} selected={}",
             anchor == null ? "none" : formatVec3(anchor),
@@ -94,13 +101,27 @@ public class CrewAssignStickItem extends CommandStickItem {
         }
         if (vehicleEntityId > 0) {
             // Anchor on the vehicle itself; the server mounts on the entity id.
-            anchor = player.level().getEntity(vehicleEntityId).position();
+            Entity vehicle = player.level().getEntity(vehicleEntityId);
+            if (vehicle == null) return false;
+            anchor = vehicle.position();
         }
         NetworkHandler.INSTANCE.sendToServer(
             new CommandStickAssignCrewPacket(anchor,
                 hit == null ? net.minecraft.core.BlockPos.containing(anchor) : hit.getBlockPos(),
                 vehicleEntityId, selected));
         return true;
+    }
+
+    /** Selected soldiers permitted by the invoking tool; role filtering is applied by callers as needed. */
+    public static List<Integer> selectedSoldierIds(Player player, boolean requireOwnership) {
+        List<Integer> soldierIds = new ArrayList<>();
+        for (int id : CommandStickSelection.getSelectedIds()) {
+            if (player.level().getEntity(id) instanceof SoldierEntity soldier
+                && (!requireOwnership || soldier.isOwnedBy(player))) {
+                soldierIds.add(id);
+            }
+        }
+        return soldierIds;
     }
 
     /** Operational Superb Warfare vehicle under the crosshair's entity id, or 0. */
@@ -110,7 +131,8 @@ public class CrewAssignStickItem extends CommandStickItem {
         }
         HitResult hit = player.pick(SEAT_REACH, 1.0F, false);
         if (hit.getType() == HitResult.Type.ENTITY && hit instanceof EntityHitResult entityHit
-            && com.stevesarmy.compat.SbwCompat.isOperational(entityHit.getEntity())) {
+            && com.stevesarmy.compat.SbwCompat.isOperational(entityHit.getEntity())
+            && !com.stevesarmy.compat.sbw.SbwVehicles.isDrone(entityHit.getEntity())) {
             return entityHit.getEntity().getId();
         }
         return 0;

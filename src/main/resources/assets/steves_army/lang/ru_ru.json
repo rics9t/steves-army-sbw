@@ -17,6 +17,8 @@
     "item.steves_army.skin_knife": "Нож для смены скина",
     "item.steves_army.command_stick": "Командная трость",
     "item.steves_army.creative_command_stick": "Творческая командная трость",
+    "item.steves_army.creative_command_stick.select_any": "Щёлкните правой кнопкой по любому солдату, чтобы выбрать его",
+    "item.steves_army.creative_command_stick.board": "Shift + правая кнопка по технике SBW — посадить выбранных солдат",
     "item.steves_army.crew_assign_stick": "Трость назначения экипажа",
     "item.steves_army.soldier_spawn_egg": "Яйцо призыва стрелка",
     "item.steves_army.enemy_soldier_spawn_egg": "Яйцо призыва вражеского солдата",

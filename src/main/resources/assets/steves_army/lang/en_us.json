@@ -50,6 +50,8 @@
     "item.steves_army.skin_knife": "Skin Knife",
     "item.steves_army.command_stick": "Command Stick",
     "item.steves_army.creative_command_stick": "Creative Command Stick",
+    "item.steves_army.creative_command_stick.select_any": "Right-click any soldier to select them",
+    "item.steves_army.creative_command_stick.board": "Shift-right-click an SBW vehicle to board selected soldiers",
     "item.steves_army.crew_assign_stick": "Crew Assign Stick",
     "item.steves_army.soldier_spawn_egg": "Rifleman Spawn Egg",
     "item.steves_army.enemy_soldier_spawn_egg": "Enemy Soldier Spawn Egg",
