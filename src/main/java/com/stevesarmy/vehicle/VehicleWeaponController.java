@@ -1,5 +1,6 @@
 package com.stevesarmy.vehicle;
 
+import com.stevesarmy.compat.sbw.SbwCompat;
 import com.stevesarmy.compat.sbw.SbwVehicles;
 import com.stevesarmy.entity.SoldierEntity;
 import net.minecraft.util.Mth;
