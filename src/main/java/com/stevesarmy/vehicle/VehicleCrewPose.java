@@ -34,8 +34,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * The fix is a single authority that runs at the end of the server tick, after
  * all AI has had its say:
  *   - body yaw is pinned to the hull, so nothing can rotate it;
- *   - the head is clamped to the seat arc and slewed at a human rate with a
- *     dead zone, so tiny target jitter cannot turn into a shake;
+ *   - the head is clamped to the seat arc, uses brief saccades for large gaze
+ *     changes, and tracks small target motion smoothly;
  *   - the same point is pushed into the look control, so next tick the AI
  *     agrees with this class instead of fighting it;
  *   - previous rotations are carried over properly, so the client still
@@ -44,20 +44,11 @@ import java.util.concurrent.ConcurrentHashMap;
 @Mod.EventBusSubscriber(modid = StevesArmyMod.MODID)
 public final class VehicleCrewPose {
 
-    /** Maximum head traverse per tick, degrees. A person, not a servo. */
-    private static final float MAX_HEAD_STEP = 3.0f;
-    private static final float MAX_PITCH_STEP = 2.0f;
-    /** Ignore corrections smaller than this, the source of the micro shake. */
-    private static final float DEAD_ZONE = 0.6f;
+    private static final float SACCADE_THRESHOLD = 7.0f;
     private static final float HEAD_ARC = 70.0f;
     /** Seats that are sealed inside the hull but still allow looking around. */
     private static final float ENCLOSED_HEAD_ARC = 40.0f;
     private static final float PITCH_ARC = 35.0f;
-    /**
-     * How long a lost target keeps its bearing before the crew goes back to idle
-     * scanning. Targets flicker in and out of sight, and flipping the desired yaw
-     * every few ticks is what made necks twitch.
-     */
     private static final int TARGET_HOLD_TICKS = 40;
 
     private static final Map<UUID, Pose> POSES = new ConcurrentHashMap<>();
@@ -67,19 +58,32 @@ public final class VehicleCrewPose {
     }
 
     private static final class Pose {
-        float headYaw;
-        float headYawPrevious;
+        float relYaw;
         float pitch;
-        float pitchPrevious;
-        float heldYaw;
+        float fromYaw;
+        float toYaw;
+        float fromPitch;
+        float toPitch;
+        float heldRelYaw;
         float heldPitch;
+        float glanceYaw;
+        float glancePitch;
+        float drift;
+        float driftVelocity;
+        float lastHead = Float.NaN;
+        float lastPitch = Float.NaN;
+        int saccadeTick;
+        int saccadeLength;
+        int fixationTicks;
+        int reactionTicks;
         int holdTicks;
-        final float phase;
+        int side;
+        long nextGlanceAt;
+        LivingEntity lastTarget;
 
-        Pose(float yaw, float phase) {
-            this.headYaw = yaw;
-            this.headYawPrevious = yaw;
-            this.phase = phase;
+        Pose(float relYaw, float pitch) {
+            this.relYaw = relYaw;
+            this.pitch = pitch;
         }
     }
 
@@ -148,11 +152,10 @@ public final class VehicleCrewPose {
     }
 
     private static void apply(SoldierEntity soldier, Entity vehicle) {
-        Pose pose = POSES.computeIfAbsent(soldier.getUUID(),
-            id -> new Pose(soldier.getYHeadRot(), (id.hashCode() & 0x7fff) * 0.37f));
-
         float hullYaw = vehicle.getYRot();
-        float desiredYaw;
+        Pose pose = POSES.computeIfAbsent(soldier.getUUID(), id ->
+            new Pose(Mth.wrapDegrees(soldier.getYHeadRot() - hullYaw), soldier.getXRot()));
+        float desiredRelYaw;
         float desiredPitch;
 
         // Seat rules: a seat that cannot rotate the head keeps it dead ahead, a seat sealed
@@ -168,70 +171,122 @@ public final class VehicleCrewPose {
         }
 
         LivingEntity target = soldier.getTarget();
-        boolean tracking = target != null && target.isAlive()
-            && soldier.distanceToSqr(target) < 256.0 * 256.0;
+        boolean tracking = arc > 0.0f && target != null && target.isAlive()
+            && soldier.distanceToSqr(target) < 96.0 * 96.0;
 
         if (tracking) {
             Vec3 toTarget = target.getEyePosition().subtract(soldier.getEyePosition());
             double flat = Math.sqrt(toTarget.x * toTarget.x + toTarget.z * toTarget.z);
-            desiredYaw = (float) Math.toDegrees(Math.atan2(-toTarget.x, toTarget.z));
+            float desiredWorldYaw = (float) Math.toDegrees(Math.atan2(-toTarget.x, toTarget.z));
+            desiredRelYaw = Mth.wrapDegrees(desiredWorldYaw - hullYaw);
             desiredPitch = (float) -Math.toDegrees(Math.atan2(toTarget.y, Math.max(0.01, flat)));
-            pose.heldYaw = desiredYaw;
-            pose.heldPitch = desiredPitch;
+
+            // Keep the target on the same side of the seat when it crosses behind
+            // the soldier. Clamping a wrapped world angle directly swaps arc edges.
+            if (Math.abs(desiredRelYaw) <= arc) {
+                pose.side = 0;
+            } else {
+                int targetSide = desiredRelYaw >= 0.0f ? 1 : -1;
+                if (pose.side == 0 || (Math.abs(desiredRelYaw) < 150.0f
+                    && targetSide != pose.side)) {
+                    pose.side = targetSide;
+                }
+                desiredRelYaw = pose.side * arc;
+            }
+
             pose.holdTicks = TARGET_HOLD_TICKS;
+            if (pose.lastTarget != target) {
+                pose.lastTarget = target;
+                pose.reactionTicks = 2 + soldier.getRandom().nextInt(5);
+                pose.saccadeLength = 0;
+                pose.fixationTicks = 0;
+            }
+            pose.heldRelYaw = desiredRelYaw;
+            pose.heldPitch = desiredPitch;
         } else if (pose.holdTicks > 0) {
             // Target just dropped out: keep looking where it was instead of snapping to idle.
             pose.holdTicks--;
-            desiredYaw = pose.heldYaw;
+            desiredRelYaw = pose.heldRelYaw;
             desiredPitch = pose.heldPitch;
         } else {
-            // Idle: two slow sines, never repeating in step, so the crew reads
-            // as alive without a single abrupt movement.
-            double time = (soldier.level().getGameTime() + pose.phase) * 0.0115;
-            desiredYaw = hullYaw + (float) (Math.sin(time) * 15.0 + Math.sin(time * 0.41 + 1.7) * 8.0);
-            desiredPitch = (float) (Math.sin(time * 0.23) * 4.0);
+            pose.lastTarget = null;
+            pose.side = 0;
+            if (soldier.level().getGameTime() >= pose.nextGlanceAt) {
+                var random = soldier.getRandom();
+                float spread = arc * (random.nextFloat() < 0.25f ? 0.95f : 0.45f);
+                pose.glanceYaw = Mth.clamp((float) (random.nextGaussian() * spread), -arc, arc);
+                pose.glancePitch = (float) random.nextGaussian() * 5.0f;
+                pose.nextGlanceAt = soldier.level().getGameTime()
+                    + 25 + random.nextInt(random.nextFloat() < 0.3f ? 160 : 70);
+            }
+            desiredRelYaw = pose.glanceYaw;
+            desiredPitch = pose.glancePitch;
         }
 
-        float relative = Mth.clamp(Mth.wrapDegrees(desiredYaw - hullYaw), -arc, arc);
-        desiredYaw = Mth.wrapDegrees(hullYaw + relative);
+        desiredRelYaw = Mth.clamp(desiredRelYaw, -arc, arc);
         desiredPitch = Mth.clamp(desiredPitch, -PITCH_ARC, PITCH_ARC);
         if (arc <= 0.0f) desiredPitch = 0.0f;
 
-        pose.headYawPrevious = pose.headYaw;
-        pose.pitchPrevious = pose.pitch;
-        pose.headYaw = approach(pose.headYaw, desiredYaw, MAX_HEAD_STEP);
-        pose.pitch = approachLinear(pose.pitch, desiredPitch, MAX_PITCH_STEP);
+        if (pose.reactionTicks > 0) {
+            pose.reactionTicks--;
+        } else if (pose.saccadeLength > 0) {
+            pose.saccadeTick++;
+            float t = Math.min(1.0f, pose.saccadeTick / (float) pose.saccadeLength);
+            float eased = t * t * t * (10.0f + t * (-15.0f + 6.0f * t));
+            pose.relYaw = pose.fromYaw + (pose.toYaw - pose.fromYaw) * eased;
+            pose.pitch = pose.fromPitch + (pose.toPitch - pose.fromPitch) * eased;
+            if (t >= 1.0f) {
+                pose.saccadeLength = 0;
+                pose.fixationTicks = 4 + soldier.getRandom().nextInt(10);
+            }
+        } else {
+            float yawError = Mth.wrapDegrees(desiredRelYaw - pose.relYaw);
+            float pitchError = desiredPitch - pose.pitch;
+            if (pose.fixationTicks > 0) pose.fixationTicks--;
+            if ((Math.abs(yawError) > SACCADE_THRESHOLD || Math.abs(pitchError) > 8.0f)
+                && pose.fixationTicks <= 0) {
+                float amplitude = Math.max(Math.abs(yawError), Math.abs(pitchError));
+                pose.fromYaw = pose.relYaw;
+                pose.fromPitch = pose.pitch;
+                pose.toYaw = pose.relYaw + yawError * (0.86f + soldier.getRandom().nextFloat() * 0.12f);
+                pose.toPitch = pose.pitch + pitchError * 0.9f;
+                pose.saccadeLength = Mth.clamp(2 + Math.round(amplitude / 14.0f), 2, 7);
+                pose.saccadeTick = 0;
+            } else if (tracking) {
+                pose.relYaw += Mth.clamp(yawError * 0.5f, -2.5f, 2.5f);
+                pose.pitch += Mth.clamp(pitchError * 0.5f, -2.0f, 2.0f);
+            }
+        }
 
-        // One authority for every rotation field, including the previous tick
-        // values the client interpolates from.
+        var random = soldier.getRandom();
+        pose.driftVelocity = pose.driftVelocity * 0.85f + (random.nextFloat() - 0.5f) * 0.12f;
+        pose.drift = Mth.clamp(pose.drift + pose.driftVelocity, -0.8f, 0.8f);
+        pose.relYaw = Mth.clamp(pose.relYaw, -arc, arc);
+        pose.pitch = Mth.clamp(pose.pitch, -PITCH_ARC, PITCH_ARC);
+        float headYaw = Mth.wrapDegrees(hullYaw + pose.relYaw + (arc > 0.0f ? pose.drift : 0.0f));
+        writePose(soldier, vehicle, headYaw, pose.pitch, pose);
+    }
+
+    /** Writes the body, head, pitch and previous-tick rotations from one place. */
+    private static void writePose(SoldierEntity soldier, Entity vehicle,
+                                  float headYaw, float pitch, Pose pose) {
+        float hullYaw = vehicle.getYRot();
+        float previousHead = Float.isNaN(pose.lastHead) ? headYaw : pose.lastHead;
+        float previousPitch = Float.isNaN(pose.lastPitch) ? pitch : pose.lastPitch;
         soldier.setYRot(hullYaw);
-        soldier.yRotO = hullYaw;
+        soldier.yRotO = vehicle.yRotO;
         soldier.setYBodyRot(hullYaw);
-        soldier.yBodyRotO = hullYaw;
-        soldier.setYHeadRot(pose.headYaw);
-        soldier.yHeadRotO = pose.headYawPrevious;
-        soldier.setXRot(pose.pitch);
-        soldier.xRotO = pose.pitchPrevious;
+        soldier.yBodyRotO = vehicle.yRotO;
+        soldier.setYHeadRot(headYaw);
+        soldier.yHeadRotO = previousHead;
+        soldier.setXRot(pitch);
+        soldier.xRotO = previousPitch;
+        pose.lastHead = headYaw;
+        pose.lastPitch = pitch;
 
-        // Keep the look control in agreement so it does not fight back next tick.
         Vec3 eye = soldier.getEyePosition();
-        Vec3 look = Vec3.directionFromRotation(pose.pitch, pose.headYaw).scale(12.0);
+        Vec3 look = Vec3.directionFromRotation(pitch, headYaw).scale(12.0);
         soldier.getLookControl().setLookAt(eye.x + look.x, eye.y + look.y, eye.z + look.z);
-    }
-
-    private static float approach(float current, float desired, float maxStep) {
-        float delta = Mth.wrapDegrees(desired - current);
-        if (Math.abs(delta) < DEAD_ZONE) return current;
-        // Exponential ease plus a hard rate cap: smooth start, no snap.
-        float eased = delta * 0.35f;
-        float step = Mth.clamp(eased, -maxStep, maxStep);
-        return Mth.wrapDegrees(current + step);
-    }
-
-    private static float approachLinear(float current, float desired, float maxStep) {
-        float delta = desired - current;
-        if (Math.abs(delta) < DEAD_ZONE) return current;
-        return current + Mth.clamp(delta * 0.35f, -maxStep, maxStep);
     }
 
     public static void forget(SoldierEntity soldier) {

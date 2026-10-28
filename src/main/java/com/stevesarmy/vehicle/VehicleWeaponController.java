@@ -1,6 +1,5 @@
 package com.stevesarmy.vehicle;
 
-import com.stevesarmy.compat.sbw.SbwCompat;
 import com.stevesarmy.compat.sbw.SbwVehicles;
 import com.stevesarmy.entity.SoldierEntity;
 import net.minecraft.util.Mth;
@@ -16,6 +15,7 @@ import java.util.WeakHashMap;
 /** Selects crew weapons and scans with an idle turret; SBW itself fires them. */
 public final class VehicleWeaponController {
     private static final int MIN_SWITCH_TICKS = 14;
+    private static final float MAX_SCAN_YAW = 150.0f;
     private static final Map<Entity, TurretState> STATES = new WeakHashMap<>();
 
     private VehicleWeaponController() {}
@@ -86,12 +86,42 @@ public final class VehicleWeaponController {
 
     private static void scanIdle(Entity vehicle, int seat, TurretState state) {
         long now = vehicle.level().getGameTime();
-        if (now >= state.nextScanAt) {
-            state.scanTarget = (vehicle.level().random.nextFloat() * 2.0f - 1.0f) * 28.0f;
-            state.nextScanAt = now + 65 + vehicle.level().random.nextInt(90);
+        var random = vehicle.level().random;
+        boolean moving = vehicle.getDeltaMovement().horizontalDistanceSqr() > 0.0036;
+
+        if (!state.scanInitialized || now >= state.nextScanAt
+            || (moving != state.wasMoving && random.nextFloat() < 0.35f)) {
+            state.scanInitialized = true;
+            state.wasMoving = moving;
+
+            float target;
+            if (moving) {
+                target = (float) (random.nextGaussian() * 20.0);
+                if (random.nextFloat() < 0.18f) {
+                    target = (random.nextBoolean() ? 1.0f : -1.0f)
+                        * (45.0f + random.nextFloat() * 40.0f);
+                }
+                state.nextScanAt = now + 28 + random.nextInt(58);
+            } else if (random.nextFloat() < 0.24f) {
+                target = (random.nextBoolean() ? 1.0f : -1.0f)
+                    * (58.0f + random.nextFloat() * 55.0f);
+                state.nextScanAt = now + 48 + random.nextInt(125);
+            } else {
+                target = (float) (random.nextGaussian() * 34.0);
+                state.nextScanAt = now + 48 + random.nextInt(125);
+            }
+
+            state.scanTarget = Mth.clamp(target, -MAX_SCAN_YAW, MAX_SCAN_YAW);
+            state.scanPitch = -1.0f - random.nextFloat() * 4.0f
+                - (random.nextFloat() < 0.12f ? 6.0f : 0.0f);
+            state.scanRate = 0.6f + random.nextFloat() * 0.9f;
         }
-        state.scanYaw = Mth.approach(state.scanYaw, state.scanTarget, 0.28f);
-        Vec3 direction = Vec3.directionFromRotation(-3.0f, vehicle.getYRot() + state.scanYaw);
+
+        float error = Mth.wrapDegrees(state.scanTarget - state.scanYaw);
+        state.scanYaw = Mth.wrapDegrees(state.scanYaw
+            + Mth.clamp(error, -state.scanRate, state.scanRate));
+        Vec3 direction = Vec3.directionFromRotation(state.scanPitch,
+            vehicle.getYRot() + state.scanYaw);
         SbwVehicles.aimWeapon(vehicle, seat, direction);
     }
 
@@ -106,7 +136,11 @@ public final class VehicleWeaponController {
     private static final class TurretState {
         private float scanYaw;
         private float scanTarget;
+        private float scanPitch = -2.0f;
+        private float scanRate = 1.0f;
         private long nextScanAt;
+        private boolean scanInitialized;
+        private boolean wasMoving;
         private long lastSwitchAt = Long.MIN_VALUE / 2;
         private long unavailableSince = -1;
         private boolean wasReloading;

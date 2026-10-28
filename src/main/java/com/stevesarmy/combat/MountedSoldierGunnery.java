@@ -4,9 +4,9 @@ import com.stevesarmy.StevesArmyConfig;
 import com.stevesarmy.compat.sbw.SbwCompat;
 import com.stevesarmy.compat.sbw.SbwVehicles;
 import com.stevesarmy.entity.SoldierEntity;
+import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
-import net.minecraft.util.Mth;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.Comparator;
@@ -56,14 +56,21 @@ public final class MountedSoldierGunnery {
         }
 
         Vec3 aimPoint = target.getEyePosition();
-        faceTarget(soldier, aimPoint);
+        // VehicleCrewPose owns the head rotation and moves it with the mounted
+        // saccade/pursuit model. Do not steer the head here as well: that made
+        // the shot gate inspect a temporary yaw which the pose writer replaced
+        // at the end of the same server tick.
         GunIntegration.aim(soldier, true);
-        if (GunIntegration.getAimProgress(soldier) < 0.5f
-            || GunIntegration.isDrawing(soldier)
+        if (GunIntegration.isDrawing(soldier)
             || GunIntegration.isReloading(soldier)
             || GunIntegration.isBolting(soldier)) {
             return;
         }
+
+        Vec3 toTarget = aimPoint.subtract(soldier.getEyePosition());
+        float targetYaw = (float) Math.toDegrees(Math.atan2(-toTarget.x, toTarget.z));
+        float yawError = Mth.wrapDegrees(targetYaw - soldier.getYHeadRot());
+        if (Math.abs(yawError) > 9.0f) return;
 
         if (GunIntegration.getCurrentAmmo(soldier) <= 0) {
             if (GunIntegration.canReload(soldier)) GunIntegration.reload(soldier);
@@ -91,18 +98,4 @@ public final class MountedSoldierGunnery {
             && TargetAcquisition.hasLineOfSight(soldier, target);
     }
 
-    private static void faceTarget(SoldierEntity soldier, Vec3 target) {
-        Vec3 delta = target.subtract(soldier.getEyePosition());
-        double horizontal = Math.sqrt(delta.x * delta.x + delta.z * delta.z);
-        float targetYaw = (float) (Math.toDegrees(Math.atan2(delta.z, delta.x)) - 90.0);
-        float targetPitch = (float) -Math.toDegrees(Math.atan2(delta.y, horizontal));
-
-        // SBW controls the seated body's rotation from its seat transform.
-        // Changing YRot/YBodyRot here fights that update and makes the head
-        // oscillate. Track with the head and pitch; the handheld firing API
-        // aims at the target position independently of body yaw.
-        float headYaw = Mth.approachDegrees(soldier.getYHeadRot(), targetYaw, 8.0f);
-        soldier.setYHeadRot(headYaw);
-        soldier.setXRot(Mth.approach(soldier.getXRot(), Mth.clamp(targetPitch, -90.0f, 90.0f), 5.0f));
-    }
 }

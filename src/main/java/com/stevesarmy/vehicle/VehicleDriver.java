@@ -10,7 +10,10 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 
 import java.lang.ref.WeakReference;
@@ -42,7 +45,8 @@ public final class VehicleDriver {
     private static final double FOLLOW_DISTANCE = 12.0;
     private static final double FOLLOW_SLACK = 3.0;
     private static final double MOVE_STOP_RADIUS = 2.0;
-    private static final double ATTACK_STANDOFF = 24.0;
+    private static final double COMBAT_STANDOFF_MIN = 18.0;
+    private static final double COMBAT_STANDOFF_MAX = 34.0;
 
     /** Below this horizontal speed the hull counts as stopped. */
     private static final double STOPPED_SPEED = 0.035;
@@ -100,6 +104,14 @@ public final class VehicleDriver {
     private boolean retreatReverseClear;
     private int retreatPathCooldown;
 
+    /** Temporary firing position used while attacking or defending a HOLD point. */
+    private Vec3 fightSpot;
+    private BlockPos holdAnchor;
+    private long nextFightSpotAt;
+    private int lastCombatAmmo = -1;
+    private int lastCombatWeapon = -1;
+    private int combatOrbitSign = 1;
+
     VehicleDriver(Entity vehicle) {
         this.vehicleRef = new WeakReference<>(vehicle);
         this.previousYaw = vehicle.getYRot();
@@ -126,6 +138,7 @@ public final class VehicleDriver {
         this.mode = VehicleDriveMode.FOLLOW;
         this.followTarget = new WeakReference<>(target);
         this.destination = null;
+        clearManeuver();
         clearAttack();
         clearPath();
     }
@@ -135,6 +148,7 @@ public final class VehicleDriver {
         this.destination = pos;
         this.followTarget = new WeakReference<>(null);
         this.closeRetreating = false;
+        clearManeuver();
         clearAttack();
         clearPath();
     }
@@ -145,6 +159,7 @@ public final class VehicleDriver {
         this.followTarget = new WeakReference<>(null);
         this.attackTargetId = targetId;
         this.attackTargetPos = pos;
+        clearManeuver();
         clearPath();
     }
 
@@ -155,12 +170,18 @@ public final class VehicleDriver {
         clearAttack();
         clearPath();
         Entity vehicle = vehicle();
+        this.holdAnchor = vehicle == null ? null : vehicle.blockPosition();
+        this.fightSpot = null;
+        this.nextFightSpotAt = 0L;
+        this.lastCombatAmmo = -1;
+        this.lastCombatWeapon = -1;
         if (vehicle != null) brake(vehicle);
     }
 
     public void orderDismount() {
         this.mode = VehicleDriveMode.DISMOUNT;
         this.closeRetreating = false;
+        clearManeuver();
         clearAttack();
         clearPath();
         releaseControls();
@@ -169,6 +190,14 @@ public final class VehicleDriver {
     public void clearAttack() {
         this.attackTargetId = null;
         this.attackTargetPos = null;
+    }
+
+    private void clearManeuver() {
+        fightSpot = null;
+        holdAnchor = null;
+        nextFightSpotAt = 0L;
+        lastCombatAmmo = -1;
+        lastCombatWeapon = -1;
     }
 
     private void clearPath() {
@@ -253,8 +282,7 @@ public final class VehicleDriver {
                 orderFollow(owner);
             }
         } else if (soldier.getSquadMode() == com.stevesarmy.squad.SquadMode.HOLD) {
-            if (mode != VehicleDriveMode.HOLD && mode != VehicleDriveMode.IDLE
-                && mode != VehicleDriveMode.DISMOUNT) {
+            if (mode != VehicleDriveMode.HOLD && mode != VehicleDriveMode.DISMOUNT) {
                 orderHold();
             }
         }
@@ -269,7 +297,7 @@ public final class VehicleDriver {
             case FOLLOW -> tickFollow(vehicle);
             case GO_TO -> tickGoTo(vehicle);
             case ATTACK -> tickAttack(vehicle);
-            case HOLD -> brake(vehicle);
+            case HOLD -> tickHold(vehicle);
             case DISMOUNT -> {
                 releaseControls();
                 if (isNearlyStopped(vehicle)) {
@@ -278,7 +306,7 @@ public final class VehicleDriver {
                 }
                 brake(vehicle);
             }
-            case IDLE -> releaseControls();
+            case IDLE -> tickIdle(vehicle);
         }
         trackStall(vehicle);
         return true;
@@ -304,7 +332,13 @@ public final class VehicleDriver {
             // nothing, and zeroing anyway wiped the player's keys, which also killed the
             // engine sound until the vehicle was re-entered.
             if (controlsDirty) {
-                SbwVehicles.clearInputs(vehicle);
+                // SBW sends player input only when the key bitset changes. Clearing
+                // inputs during a seat handoff can overwrite the first player packet;
+                // SBW then waits for another key transition before sending a replacement.
+                // A player in another seat still gets the AI's stale inputs released.
+                if (!(SbwVehicles.driver(vehicle) instanceof Player)) {
+                    SbwVehicles.clearInputs(vehicle);
+                }
                 controlsDirty = false;
             }
             VehicleWeaponController.forget(vehicle);
@@ -317,6 +351,13 @@ public final class VehicleDriver {
     // -- modes ----------------------------------------------------------------
 
     private void tickFollow(Entity vehicle) {
+        LivingEntity threat = activeCombatThreat(vehicle);
+        if (threat != null) {
+            tickCombatManeuver(vehicle, combatTargetPosition(threat), null, 0.0);
+            return;
+        }
+        fightSpot = null;
+
         Entity lead = followTarget.get();
         if (lead == null || !lead.isAlive()) {
             SoldierEntity soldier = driverSoldier();
@@ -380,28 +421,199 @@ public final class VehicleDriver {
     private void arriveAtDestination(Entity vehicle) {
         brake(vehicle);
         mode = VehicleDriveMode.HOLD;
+        holdAnchor = vehicle.blockPosition();
+        fightSpot = null;
         clearPath();
         SoldierEntity s = driverSoldier();
         if (s != null) s.completeGoToIfGeneration(s.getPingMoveGeneration());
     }
 
     private void tickAttack(Entity vehicle) {
+        LivingEntity threat = activeCombatThreat(vehicle);
         Vec3 targetPos = resolveAttackPosition(vehicle);
+        if (threat != null) targetPos = combatTargetPosition(threat);
         if (targetPos == null) {
             mode = VehicleDriveMode.HOLD;
             clearAttack();
             clearPath();
+            if (holdAnchor == null) holdAnchor = vehicle.blockPosition();
+            fightSpot = null;
             brake(vehicle);
             return;
         }
-        double distance = horizontalDistance(vehicle.position(), targetPos);
-        if (distance <= ATTACK_STANDOFF) {
+        tickCombatManeuver(vehicle, targetPos, null, 0.0);
+    }
+
+    private void tickHold(Entity vehicle) {
+        if (holdAnchor == null) holdAnchor = vehicle.blockPosition();
+        LivingEntity threat = activeCombatThreat(vehicle);
+        if (threat == null) {
+            fightSpot = null;
             brake(vehicle);
-            // Keep the hull pointed at the threat without driving into it.
-            steer(vehicle, targetPos, false, false);
-        } else {
-            driveAlong(vehicle, targetPos, ATTACK_STANDOFF, distance > ATTACK_STANDOFF + 25.0);
+            return;
         }
+        tickCombatManeuver(vehicle, combatTargetPosition(threat), holdAnchor, 8.0);
+    }
+
+    private void tickIdle(Entity vehicle) {
+        LivingEntity threat = activeCombatThreat(vehicle);
+        if (threat == null) {
+            fightSpot = null;
+            releaseControls();
+            return;
+        }
+        tickCombatManeuver(vehicle, combatTargetPosition(threat), null, 0.0);
+    }
+
+    private static LivingEntity activeCombatThreat(Entity vehicle) {
+        int seat = SbwVehicles.turretControllerIndex(vehicle);
+        Entity operator = SbwVehicles.passengerAt(vehicle, seat);
+        if (!(operator instanceof SoldierEntity gunner)) return null;
+        LivingEntity target = gunner.getTarget();
+        if (target == null || !target.isAlive() || target.getVehicle() == vehicle
+            || target.level() != vehicle.level() || gunner.isFriendlyTo(target)
+            || !gunner.isProactiveTarget(target)
+            || !gunner.getSensing().hasLineOfSight(target)) return null;
+        return target;
+    }
+
+    private static Vec3 combatTargetPosition(LivingEntity target) {
+        Entity targetVehicle = target.getVehicle();
+        if (com.stevesarmy.compat.SbwCompat.isVehicle(targetVehicle)) {
+            return targetVehicle.position();
+        }
+        return target.position();
+    }
+
+    /** Reposition between firing points while keeping the turret's target in view. */
+    private void tickCombatManeuver(Entity vehicle, Vec3 enemy, BlockPos anchor, double leash) {
+        double distance = horizontalDistance(vehicle.position(), enemy);
+        if (anchor == null && distance > COMBAT_STANDOFF_MAX + 25.0) {
+            fightSpot = null;
+            nextFightSpotAt = 0L;
+            driveAlong(vehicle, enemy, COMBAT_STANDOFF_MAX, true);
+            return;
+        }
+
+        int turretSeat = SbwVehicles.turretControllerIndex(vehicle);
+        int weapon = turretSeat < 0 ? -1 : SbwVehicles.weaponIndex(vehicle, turretSeat);
+        int ammo = turretSeat < 0 ? -1 : SbwVehicles.ammoCount(vehicle, turretSeat);
+        boolean fired = weapon == lastCombatWeapon && lastCombatAmmo >= 0 && ammo >= 0
+            && ammo < lastCombatAmmo;
+        lastCombatWeapon = weapon;
+        lastCombatAmmo = ammo;
+
+        float maxHealth = Math.max(1.0f, SbwVehicles.maxHealth(vehicle));
+        boolean defensive = SbwVehicles.health(vehicle) / maxHealth < 0.35f
+            || (turretSeat >= 0 && SbwVehicles.weaponReloading(vehicle, turretSeat,
+                Math.max(0, weapon)));
+        long now = vehicle.level().getGameTime();
+        var random = vehicle.level().random;
+        if (fightSpot == null || now >= nextFightSpotAt
+            || (fired && random.nextFloat() < 0.55f)) {
+            Vec3 nextSpot = pickFightSpot(vehicle, enemy, defensive, anchor, leash);
+            if (nextSpot != null) {
+                fightSpot = nextSpot;
+                clearPath();
+            } else if (fightSpot == null) {
+                fightSpot = vehicle.position();
+            }
+            combatOrbitSign = random.nextBoolean() ? 1 : -1;
+            nextFightSpotAt = now + (defensive ? 60 : 90) + random.nextInt(110);
+        }
+
+        if (fightSpot != null && horizontalDistance(vehicle.position(), fightSpot) > 3.0) {
+            driveAlong(vehicle, fightSpot, 1.5, false);
+            return;
+        }
+        if (vehicle.getDeltaMovement().horizontalDistance() > STOPPED_SPEED * 2.0) {
+            brake(vehicle);
+            return;
+        }
+
+        Vec3 toEnemy = horizontal(enemy.subtract(vehicle.position()));
+        if (toEnemy.lengthSqr() < 1.0E-4) {
+            brake(vehicle);
+            return;
+        }
+        Vec3 angled = rotate(toEnemy.normalize(), combatOrbitSign * 25.0);
+        steer(vehicle, vehicle.position().add(angled.scale(10.0)), false, false);
+    }
+
+    private Vec3 pickFightSpot(Entity vehicle, Vec3 enemy, boolean defensive,
+                               BlockPos anchor, double leash) {
+        var random = vehicle.level().random;
+        Vec3 self = vehicle.position();
+        Vec3 fromEnemy = horizontal(self.subtract(enemy));
+        double base = Math.atan2(fromEnemy.z, fromEnemy.x);
+        double halfWidth = VehiclePathfinder.footprintRadius(vehicle);
+        double height = VehiclePathfinder.footprintHeight(vehicle);
+        Vec3 best = null;
+        double bestScore = -1.0E9;
+
+        for (int i = 0; i < 12; i++) {
+            Vec3 candidate;
+            if (anchor != null) {
+                double angle = random.nextDouble() * Math.PI * 2.0;
+                double radius = 3.0 + random.nextDouble() * leash;
+                candidate = new Vec3(anchor.getX() + 0.5 + Math.cos(angle) * radius,
+                    self.y, anchor.getZ() + 0.5 + Math.sin(angle) * radius);
+            } else {
+                double swing = Math.toRadians((random.nextDouble() * 2.0 - 1.0)
+                    * (defensive ? 35.0 : 75.0));
+                double radius = defensive
+                    ? COMBAT_STANDOFF_MAX + random.nextDouble() * 8.0
+                    : COMBAT_STANDOFF_MIN
+                        + random.nextDouble() * (COMBAT_STANDOFF_MAX - COMBAT_STANDOFF_MIN);
+                candidate = new Vec3(enemy.x + Math.cos(base + swing) * radius,
+                    self.y, enemy.z + Math.sin(base + swing) * radius);
+            }
+
+            BlockPos ground = vehicle.level().getHeightmapPos(
+                Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, BlockPos.containing(candidate));
+            candidate = new Vec3(candidate.x, ground.getY(), candidate.z);
+            if (Math.abs(candidate.y - self.y) > 6.0) continue;
+
+            double travel = horizontalDistance(self, candidate);
+            boolean hullClear = lineClear(vehicle, candidate.add(0.0, 0.8, 0.0), enemy.add(0.0, 1.0, 0.0));
+            boolean turretClear = lineClear(vehicle,
+                candidate.add(0.0, vehicle.getBbHeight() + 0.3, 0.0), enemy.add(0.0, 1.5, 0.0));
+            double score = -travel * 0.12;
+            if (turretClear && !hullClear) score += 10.0;
+            else if (turretClear) score += defensive ? -2.0 : 6.0;
+            else score += defensive ? 7.0 : -9.0;
+
+            if (anchor == null) {
+                Vec3 lateral = new Vec3(-fromEnemy.z, 0.0, fromEnemy.x).normalize();
+                score += Math.abs(candidate.subtract(self).dot(lateral)) * 0.25;
+            }
+            if (VehiclePathfinder.isClearLine(vehicle.level(), self, candidate, halfWidth, height)) {
+                score += 3.0;
+            }
+            score -= friendlyHullsNear(vehicle, candidate, 9.0) * 6.0;
+            score += random.nextDouble() * 2.0;
+            if (score > bestScore) {
+                bestScore = score;
+                best = candidate;
+            }
+        }
+        return best;
+    }
+
+    private static boolean lineClear(Entity vehicle, Vec3 from, Vec3 to) {
+        return vehicle.level().clip(new ClipContext(from, to, ClipContext.Block.COLLIDER,
+            ClipContext.Fluid.NONE, vehicle)).getType() == HitResult.Type.MISS;
+    }
+
+    private int friendlyHullsNear(Entity vehicle, Vec3 position, double radius) {
+        SoldierEntity observer = driverSoldier();
+        if (observer == null) return 0;
+        int count = 0;
+        AABB area = new AABB(position, position).inflate(radius, 4.0, radius);
+        for (Entity candidate : vehicle.level().getEntities(vehicle, area)) {
+            if (isFriendlyVehicle(observer, candidate)) count++;
+        }
+        return count;
     }
 
     public Vec3 resolveAttackPosition(Entity vehicle) {
