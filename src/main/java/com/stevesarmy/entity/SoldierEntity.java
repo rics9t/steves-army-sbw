@@ -1713,6 +1713,8 @@ public class SoldierEntity extends PathfinderMob implements Container {
             // SBW passengers are real taxi riders: keep them seated and freeze
             // movement AI. Dedicated crew spots for the vehicle weapons; other
             // passengers can fire their handheld gun from seats that allow it.
+            // Head and body rotation of seated soldiers has a single owner.
+            com.stevesarmy.vehicle.VehicleCrewPose.ensureTracked(this);
             if (getRole() == SoldierRole.VEHICLE_CREW) {
                 SbwVehicleGunnery.tickMounted(this);
             } else {
@@ -2690,7 +2692,9 @@ public BlockPos getPingMoveTarget() {
     }
 
     private void updateCrawlFacing() {
-        if (!isCrawlMoving()) {
+        // A seated soldier is carried by its vehicle; writing body/head yaw here snapped
+        // the neck for the tick or two before the low-crouch flag is cleared on mounting.
+        if (!isCrawlMoving() || isMountedInSbwVehicle()) {
             return;
         }
 

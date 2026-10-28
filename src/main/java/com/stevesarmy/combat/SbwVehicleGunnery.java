@@ -2,11 +2,14 @@ package com.stevesarmy.combat;
 
 import com.stevesarmy.StevesArmyConfig;
 import com.stevesarmy.compat.SbwCompat;
+import com.stevesarmy.compat.sbw.SbwVehicles;
 import com.stevesarmy.entity.SoldierEntity;
 import com.stevesarmy.entity.SoldierRole;
+import com.stevesarmy.vehicle.VehicleWeaponController;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.phys.Vec3;
 
 import java.util.Comparator;
 import java.util.HashMap;
@@ -18,11 +21,9 @@ import java.util.UUID;
  * Spotter AI for dedicated vehicle crew mounted on Superb Warfare vehicles. While a soldier is
  * a passenger, {@code VS2Compat.prepareSoldierAi} freezes its goal system — but
  * SBW's native mob-crew gunnery fires the vehicle's turret and seat weapons at
- * whatever LivingEntity the riding Mob targets ({@code setTarget} is mirrored
- * into the vehicle's {@code aiTurretTargetUUID} and auto-fired at the weapon's
- * RPM with ballistic lead). This ticker therefore keeps exactly one thing alive
- * while the crew member's own AI is frozen: target acquisition. No movement,
- * no cover, no handheld firing — the crew member is a pure spotter; SBW shoots.
+ * the riding Mob's target. Keep spotting and weapon selection alive while the
+ * soldier's normal movement/cover AI is frozen. SBW handles the actual shots,
+ * ballistic lead and RPM; this mod must not double-fire those weapons.
  * Ordinary infantry use {@link MountedSoldierGunnery} only in seats that permit
  * handheld weapons.
  *
@@ -63,35 +64,42 @@ public final class SbwVehicleGunnery {
         }
 
         Long last = lastRetargetBySoldier.get(soldierId);
-        if (last != null && gameTime - last < RETARGET_INTERVAL_TICKS) {
-            return;
-        }
-        lastRetargetBySoldier.put(soldierId, gameTime);
-        pruneIfNeeded(gameTime);
+        if (last == null || gameTime - last >= RETARGET_INTERVAL_TICKS) {
+            lastRetargetBySoldier.put(soldierId, gameTime);
+            pruneIfNeeded(gameTime);
 
-        // Keep a still-valid target rather than flip-flopping between equals.
-        if (current != null && current.isAlive() && isValidSpottingTarget(soldier, current)) {
-            return;
+            if (current == null) {
+                double range = StevesArmyConfig.VEHICLE_CREW_DETECTION_DISTANCE.get();
+                List<LivingEntity> targets = serverLevel.getEntitiesOfClass(LivingEntity.class,
+                    soldier.getBoundingBox().inflate(range),
+                    t -> isValidSpottingTarget(soldier, t));
+                current = targets.stream()
+                    .min(Comparator.comparingDouble(soldier::distanceToSqr))
+                    .orElse(null);
+                if (current != null) soldier.setTarget(current);
+            }
         }
 
-        double range = StevesArmyConfig.getBasicDetectionDistance();
-        List<LivingEntity> targets = serverLevel.getEntitiesOfClass(LivingEntity.class,
-            soldier.getBoundingBox().inflate(range),
-            t -> t.isAlive() && isValidSpottingTarget(soldier, t));
-        LivingEntity nearest = targets.stream()
-            .min(Comparator.comparingDouble(soldier::distanceToSqr))
-            .orElse(null);
-        if (nearest != null) {
-            soldier.setTarget(nearest);
+        int seat = SbwVehicles.seatIndexOf(mount, soldier);
+        if (seat >= 0) {
+            SbwVehicles.syncAutoTarget(mount, seat, current);
+            VehicleWeaponController.tickMounted(soldier, mount, seat, current);
         }
     }
 
-    /** Ordinary targeting rules plus a sight check — the gun must actually be able to engage it. */
+    /** Spot from the vehicle's muzzle, not the crew's eye inside an enclosed hull. */
     private static boolean isValidSpottingTarget(SoldierEntity soldier, LivingEntity target) {
-        return target != soldier
-            && !soldier.isFriendlyTo(target)
-            && TargetAcquisition.isValidTarget(soldier, target)
-            && TargetAcquisition.hasLineOfSightToPosition(soldier, target.getEyePosition());
+        Entity vehicle = soldier.getVehicle();
+        if (vehicle == null || target == soldier || target.getVehicle() == vehicle
+            || target.level() != soldier.level() || !TargetAcquisition.isValidTarget(soldier, target)
+            || soldier.isFriendlyTo(target) || !soldier.isProactiveTarget(target)) return false;
+        int seat = SbwVehicles.seatIndexOf(vehicle, soldier);
+        Vec3 origin = seat >= 0 && SbwVehicles.seatHasWeapon(vehicle, seat)
+            ? SbwVehicles.shootPos(vehicle, seat) : soldier.getEyePosition();
+        Entity targetVehicle = target.getVehicle();
+        Vec3 aimPoint = SbwCompat.isVehicle(targetVehicle)
+            ? targetVehicle.getBoundingBox().getCenter() : target.getEyePosition();
+        return VisibilityRay.trace(soldier.level(), origin, aimPoint, soldier).hasContact();
     }
 
     private static void pruneIfNeeded(long gameTime) {

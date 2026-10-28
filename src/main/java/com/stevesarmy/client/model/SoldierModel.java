@@ -124,14 +124,22 @@ public class SoldierModel<T extends SoldierEntity> extends HumanoidModel<T> {
         float crawl = entity.getSwimAmount(partial);
         boolean gun = GunIntegration.isGun(entity.getMainHandItem());
         float trackingYawLimit = entity.isPassenger() ? 75.0F : 30.0F;
+        // The renderer hands us (headYaw - bodyYaw) unwrapped for non-living mounts such as
+        // SBW hulls. Near +-180 that is off by 360, which the clamp below turned into a one
+        // frame neck snap to the limit. Wrap first, then smooth while seated.
+        yaw = Mth.wrapDegrees(yaw);
+        motion.updateLook(age, Mth.clamp(yaw, -trackingYawLimit, trackingYawLimit),
+            Mth.clamp(pitch, -25.0f, 45.0f), entity.isPassenger());
+        float viewYaw = entity.isPassenger() ? motion.lookYaw : yaw;
+        float viewPitch = entity.isPassenger() ? motion.lookPitch : pitch;
         if (entity.deathTime > 0) {
             apply((entity.getId() & 1) == 0 ? SoldierAnimations.UNIT_DEATH : SoldierAnimations.UNIT_DEATH_BACK,
                 (entity.deathTime + partial) / 20, 1);
         } else {
             apply(SoldierAnimations.UNIT_IDLE, age / 20, 1 - motion.walk);
             applyLocomotion(swing, speed, motion.walk * (1 - crawl));
-            head.yRot += Mth.clamp(yaw, -trackingYawLimit, trackingYawLimit) * Mth.DEG_TO_RAD;
-            head.xRot += Mth.clamp(pitch, -25, 45) * Mth.DEG_TO_RAD;
+            head.yRot += Mth.clamp(viewYaw, -trackingYawLimit, trackingYawLimit) * Mth.DEG_TO_RAD;
+            head.xRot += Mth.clamp(viewPitch, -25, 45) * Mth.DEG_TO_RAD;
             if (gun) {
                 String id = entity.getMainHandItem().getTag() == null ? "" : entity.getMainHandItem().getTag().getString("GunId");
                 if (!id.equals(motion.gunId)) { motion.gunId = id; motion.gunType = weaponType(entity); }
@@ -143,7 +151,7 @@ public class SoldierModel<T extends SoldierEntity> extends HumanoidModel<T> {
                 rightArm.yRot = leftArm.yRot = rightArm.zRot = leftArm.zRot = 0;
             }
             applyReviewedPosture(motion.crouch * (1 - crawl), motion.coverAim,
-                motion.ready, swing, speed, gun, yaw, pitch, trackingYawLimit);
+                motion.ready, swing, speed, gun, viewYaw, viewPitch, trackingYawLimit);
             applyLocomotion(swing, speed, motion.walk * (1 - crawl) * (1 - motion.crouch));
             applyCrawl(crawl, swing, speed, pitch, gun);
             reviewedWeaponWeight = 1 - crawl;
@@ -340,6 +348,7 @@ public class SoldierModel<T extends SoldierEntity> extends HumanoidModel<T> {
 
     private static final class Motion {
         float age = Float.NaN, crouch, ready, walk, coverAim, blend;
+        float lookAge = Float.NaN, lookYaw, lookPitch;
         String gunId, gunType = "rifle";
         void update(float now, float targetCrouch, float targetReady, float targetWalk) {
             if (Float.isNaN(age)) { age = now; crouch = targetCrouch; ready = targetReady; walk = targetWalk; blend = 1; return; }
@@ -348,6 +357,18 @@ public class SoldierModel<T extends SoldierEntity> extends HumanoidModel<T> {
             crouch = Mth.lerp(blend, crouch, targetCrouch);
             ready = Mth.lerp(blend, ready, targetReady);
             walk = Mth.lerp(blend, walk, targetWalk);
+        }
+        void updateLook(float now, float yaw, float pitch, boolean seated) {
+            if (!seated) { lookAge = Float.NaN; return; }
+            if (Float.isNaN(lookAge) || now < lookAge || now - lookAge > 10) {
+                lookYaw = yaw;
+                lookPitch = pitch;
+            } else {
+                float dt = Mth.clamp(now - lookAge, 0, 3);
+                lookYaw = Mth.approachDegrees(lookYaw, yaw, dt * 2.5f);
+                lookPitch = Mth.approach(lookPitch, pitch, dt * 2.5f);
+            }
+            lookAge = now;
         }
     }
 }

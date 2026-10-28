@@ -1,139 +1,115 @@
 package com.stevesarmy.vehicle;
 
-import com.stevesarmy.compat.sbw.SbwVehicles;
 import com.stevesarmy.compat.sbw.SbwCompat;
+import com.stevesarmy.compat.sbw.SbwVehicles;
 import com.stevesarmy.entity.SoldierEntity;
-import net.minecraft.server.level.ServerLevel;
+import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
-import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.WeakHashMap;
 
+/** Selects crew weapons and scans with an idle turret; SBW itself fires them. */
 public final class VehicleWeaponController {
+    private static final int MIN_SWITCH_TICKS = 14;
+    private static final Map<Entity, TurretState> STATES = new WeakHashMap<>();
 
-    private static final Map<String, Long> NEXT_FIRE = new ConcurrentHashMap<>();
-    private static final int HEAT_CUTOFF = 90;
+    private VehicleWeaponController() {}
 
-    private VehicleWeaponController() {
+    public static void tickMounted(SoldierEntity gunner, Entity vehicle, int seat, LivingEntity target) {
+        if (vehicle == null || vehicle.level().isClientSide || !SbwCompat.isVehicle(vehicle)
+            || SbwVehicles.passengerAt(vehicle, seat) != gunner
+            || seat != SbwVehicles.turretControllerIndex(vehicle)
+            || !SbwVehicles.seatHasWeapon(vehicle, seat)) return;
+
+        TurretState state = STATES.computeIfAbsent(vehicle, ignored -> new TurretState());
+        if (target == null) {
+            scanIdle(vehicle, seat, state);
+        } else {
+            chooseWeapon(vehicle, seat, target, state);
+        }
     }
 
-    public static void tick(VehicleDriver driver, Entity vehicle) {
-        if (vehicle == null || vehicle.level().isClientSide) return;
-
-        Vec3 orderedTargetPos = driver.resolveAttackPosition(vehicle);
-        UUID targetId = driver.attackTargetId();
-
-        boolean engaging = orderedTargetPos != null
-            && (driver.mode() == VehicleDriveMode.ATTACK || driver.mode() == VehicleDriveMode.HOLD);
-
-        if (!engaging) {
-            SbwVehicles.fire(vehicle, false);
-            aimIdleTurret(vehicle);
-            return;
+    private static void chooseWeapon(Entity vehicle, int seat, LivingEntity target, TurretState state) {
+        List<String> weapons = SbwVehicles.seatWeapons(vehicle, seat);
+        int primary = 0;
+        for (int i = 0; i < weapons.size(); i++) {
+            String name = weapons.get(i).toLowerCase(Locale.ROOT);
+            if (name.contains("cannon") || name.contains("main_gun") || name.equals("main")
+                || name.contains("laser")) {
+                primary = i;
+                break;
+            }
         }
 
-        // A location order may outlive the target that originally attracted
-        // the crew. Fire only while the spotter has a live hostile target, so
-        // the cannon or MG never keeps shooting at the old aim point.
-        SoldierEntity spotter = driver.driverSoldier();
-        Entity tracked = targetId != null && vehicle.level() instanceof ServerLevel level
-            ? level.getEntity(targetId)
-            : spotter != null ? spotter.getTarget() : null;
-        if (!(tracked instanceof LivingEntity target) || !target.isAlive()
-            || spotter == null || spotter.isFriendlyTo(target)
-            || !spotter.isProactiveTarget(target)) {
-            SbwVehicles.fire(vehicle, false);
-            aimIdleTurret(vehicle);
-            return;
+        boolean armored = com.stevesarmy.compat.SbwCompat.isVehicle(target.getVehicle());
+        int backup = -1;
+        for (int i = 0; i < weapons.size(); i++) {
+            if (i == primary) continue;
+            String name = weapons.get(i).toLowerCase(Locale.ROOT);
+            boolean suitable = armored
+                ? name.contains("missile") || name.contains("rocket") || name.contains("cannon")
+                : name.contains("machinegun") || name.contains("machine_gun")
+                    || name.contains("coax") || name.startsWith("mg");
+            if (suitable && SbwVehicles.weaponReady(vehicle, seat, i)) {
+                backup = i;
+                break;
+            }
         }
-        targetId = target.getUUID();
-        Entity targetVehicle = target.getVehicle();
-        Vec3 targetPos = SbwCompat.isVehicle(targetVehicle)
-            ? targetVehicle.getBoundingBox().getCenter()
-            : target.getBoundingBox().getCenter();
-
-        // The driver seat owns the main turret's selectable weapons. Prefer
-        // the cannon against hostile crew inside a vehicle and the coaxial MG
-        // against exposed infantry; passenger stations keep their own loadout.
-        selectMainWeapon(vehicle, target);
 
         long now = vehicle.level().getGameTime();
-        int seats = SbwVehicles.maxPassengers(vehicle);
+        boolean reloading = SbwVehicles.weaponReloading(vehicle, seat, primary);
+        boolean ready = SbwVehicles.weaponReady(vehicle, seat, primary);
+        if (reloading && !state.wasReloading) {
+            state.useBackupThisReload = vehicle.level().random.nextFloat() < 0.65f;
+        }
+        if (ready) state.unavailableSince = -1;
+        else if (state.unavailableSince < 0) state.unavailableSince = now;
 
-        for (int seatIndex = 0; seatIndex < seats; seatIndex++) {
-            Entity occupant = SbwVehicles.passengerAt(vehicle, seatIndex);
-            if (!(occupant instanceof SoldierEntity gunner)) continue;
-            if (!SbwVehicles.seatHasWeapon(vehicle, seatIndex)) continue;
+        int preferred = primary;
+        if (backup >= 0 && !ready && (reloading && state.useBackupThisReload
+            || !reloading && now - state.unavailableSince >= 12)) {
+            preferred = backup;
+        }
+        state.wasReloading = reloading;
 
-            String weaponName = SbwVehicles.getGunName(vehicle, seatIndex);
-            if (weaponName == null) continue;
-
-            if (SbwVehicles.ammoCount(vehicle, seatIndex) <= 0) continue;
-            if (SbwVehicles.weaponHeat(vehicle, seatIndex) >= HEAT_CUTOFF) continue;
-
-            String key = vehicle.getUUID() + ":" + seatIndex + ":" + weaponName;
-            long next = NEXT_FIRE.getOrDefault(key, 0L);
-            if (now < next) continue;
-
-            Vec3 shootPos = SbwVehicles.shootPos(vehicle, seatIndex);
-            Vec3 aimVec = targetPos.subtract(shootPos).normalize();
-            SbwVehicles.aimWeapon(vehicle, seatIndex, aimVec);
-
-            boolean fired = SbwVehicles.shoot(vehicle, gunner, targetId, targetPos);
-            if (fired) {
-                NEXT_FIRE.put(key, now + cooldownFor(vehicle, seatIndex, weaponName));
-            }
+        if (SbwVehicles.weaponIndex(vehicle, seat) != preferred
+            && now - state.lastSwitchAt >= MIN_SWITCH_TICKS) {
+            SbwVehicles.setWeaponIndex(vehicle, seat, preferred);
+            state.lastSwitchAt = now;
         }
     }
 
-    private static void selectMainWeapon(Entity vehicle, LivingEntity target) {
-        int seat = SbwVehicles.turretControllerIndex(vehicle);
-        if (seat < 0) return;
-        boolean armoredTarget = SbwCompat.isVehicle(target.getVehicle());
-        java.util.List<String> weapons = SbwVehicles.seatWeapons(vehicle, seat);
-        for (int i = 0; i < weapons.size(); i++) {
-            String name = weapons.get(i).toLowerCase(java.util.Locale.ROOT);
-            boolean match = armoredTarget
-                ? name.contains("cannon") || name.contains("main_gun") || name.equals("main")
-                : name.contains("machinegun") || name.contains("machine_gun")
-                    || name.contains("coax") || name.equals("mg");
-            if (match && SbwVehicles.weaponIndex(vehicle, seat) != i) {
-                SbwVehicles.setWeaponIndex(vehicle, seat, i);
-            }
-            if (match) return;
+    private static void scanIdle(Entity vehicle, int seat, TurretState state) {
+        long now = vehicle.level().getGameTime();
+        if (now >= state.nextScanAt) {
+            state.scanTarget = (vehicle.level().random.nextFloat() * 2.0f - 1.0f) * 28.0f;
+            state.nextScanAt = now + 65 + vehicle.level().random.nextInt(90);
         }
-    }
-
-    private static int cooldownFor(Entity vehicle, int seatIndex, String weaponName) {
-        String normalized = weaponName.toLowerCase(java.util.Locale.ROOT);
-        if (normalized.contains("machinegun") || normalized.contains("machine_gun")
-            || normalized.contains("coax") || normalized.equals("mg")) {
-            return 2;
-        }
-        if (normalized.contains("missile") || normalized.contains("rocket")) return 40;
-        SbwVehicles.Kind kind = SbwVehicles.kind(vehicle);
-        if (seatIndex == 0 && kind == SbwVehicles.Kind.TRACKED) {
-            return 80;
-        }
-        return kind == SbwVehicles.Kind.HELICOPTER || kind == SbwVehicles.Kind.AIRCRAFT ? 10 : 15;
-    }
-
-    private static void aimIdleTurret(Entity vehicle) {
-        int seat = SbwVehicles.turretControllerIndex(vehicle);
-        if (seat < 0 || !SbwVehicles.seatHasWeapon(vehicle, seat)) return;
-        long time = vehicle.level().getGameTime();
-        double phase = (time + vehicle.getId() * 19.0) * (Math.PI / 140.0);
-        float yaw = vehicle.getYRot() + (float) (Math.sin(phase) * 22.0);
-        Vec3 direction = Vec3.directionFromRotation(-3.0F, yaw);
+        state.scanYaw = Mth.approach(state.scanYaw, state.scanTarget, 0.28f);
+        Vec3 direction = Vec3.directionFromRotation(-3.0f, vehicle.getYRot() + state.scanYaw);
         SbwVehicles.aimWeapon(vehicle, seat, direction);
     }
 
     public static void forget(Entity vehicle) {
-        if (vehicle == null) return;
-        String prefix = vehicle.getUUID().toString() + ":";
-        NEXT_FIRE.keySet().removeIf(k -> k.startsWith(prefix));
+        if (vehicle != null) STATES.remove(vehicle);
+    }
+
+    public static void clearAll() {
+        STATES.clear();
+    }
+
+    private static final class TurretState {
+        private float scanYaw;
+        private float scanTarget;
+        private long nextScanAt;
+        private long lastSwitchAt = Long.MIN_VALUE / 2;
+        private long unavailableSince = -1;
+        private boolean wasReloading;
+        private boolean useBackupThisReload;
     }
 }

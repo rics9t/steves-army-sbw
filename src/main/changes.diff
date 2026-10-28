@@ -1,0 +1,1167 @@
+diff --git a/java/com/stevesarmy/client/model/SoldierModel.java b/java/com/stevesarmy/client/model/SoldierModel.java
+index 01c4068..eaa73a0 100644
+--- a/java/com/stevesarmy/client/model/SoldierModel.java
++++ b/java/com/stevesarmy/client/model/SoldierModel.java
+@@ -124,14 +124,22 @@ public class SoldierModel<T extends SoldierEntity> extends HumanoidModel<T> {
+         float crawl = entity.getSwimAmount(partial);
+         boolean gun = GunIntegration.isGun(entity.getMainHandItem());
+         float trackingYawLimit = entity.isPassenger() ? 75.0F : 30.0F;
++        // The renderer hands us (headYaw - bodyYaw) unwrapped for non-living mounts such as
++        // SBW hulls. Near +-180 that is off by 360, which the clamp below turned into a one
++        // frame neck snap to the limit. Wrap first, then smooth while seated.
++        yaw = Mth.wrapDegrees(yaw);
++        motion.updateLook(age, Mth.clamp(yaw, -trackingYawLimit, trackingYawLimit),
++            Mth.clamp(pitch, -25.0f, 45.0f), entity.isPassenger());
++        float viewYaw = entity.isPassenger() ? motion.lookYaw : yaw;
++        float viewPitch = entity.isPassenger() ? motion.lookPitch : pitch;
+         if (entity.deathTime > 0) {
+             apply((entity.getId() & 1) == 0 ? SoldierAnimations.UNIT_DEATH : SoldierAnimations.UNIT_DEATH_BACK,
+                 (entity.deathTime + partial) / 20, 1);
+         } else {
+             apply(SoldierAnimations.UNIT_IDLE, age / 20, 1 - motion.walk);
+             applyLocomotion(swing, speed, motion.walk * (1 - crawl));
+-            head.yRot += Mth.clamp(yaw, -trackingYawLimit, trackingYawLimit) * Mth.DEG_TO_RAD;
+-            head.xRot += Mth.clamp(pitch, -25, 45) * Mth.DEG_TO_RAD;
++            head.yRot += Mth.clamp(viewYaw, -trackingYawLimit, trackingYawLimit) * Mth.DEG_TO_RAD;
++            head.xRot += Mth.clamp(viewPitch, -25, 45) * Mth.DEG_TO_RAD;
+             if (gun) {
+                 String id = entity.getMainHandItem().getTag() == null ? "" : entity.getMainHandItem().getTag().getString("GunId");
+                 if (!id.equals(motion.gunId)) { motion.gunId = id; motion.gunType = weaponType(entity); }
+@@ -143,7 +151,7 @@ public class SoldierModel<T extends SoldierEntity> extends HumanoidModel<T> {
+                 rightArm.yRot = leftArm.yRot = rightArm.zRot = leftArm.zRot = 0;
+             }
+             applyReviewedPosture(motion.crouch * (1 - crawl), motion.coverAim,
+-                motion.ready, swing, speed, gun, yaw, pitch, trackingYawLimit);
++                motion.ready, swing, speed, gun, viewYaw, viewPitch, trackingYawLimit);
+             applyLocomotion(swing, speed, motion.walk * (1 - crawl) * (1 - motion.crouch));
+             applyCrawl(crawl, swing, speed, pitch, gun);
+             reviewedWeaponWeight = 1 - crawl;
+@@ -340,6 +348,7 @@ public class SoldierModel<T extends SoldierEntity> extends HumanoidModel<T> {
+ 
+     private static final class Motion {
+         float age = Float.NaN, crouch, ready, walk, coverAim, blend;
++        float lookAge = Float.NaN, lookYaw, lookPitch;
+         String gunId, gunType = "rifle";
+         void update(float now, float targetCrouch, float targetReady, float targetWalk) {
+             if (Float.isNaN(age)) { age = now; crouch = targetCrouch; ready = targetReady; walk = targetWalk; blend = 1; return; }
+@@ -349,5 +358,17 @@ public class SoldierModel<T extends SoldierEntity> extends HumanoidModel<T> {
+             ready = Mth.lerp(blend, ready, targetReady);
+             walk = Mth.lerp(blend, walk, targetWalk);
+         }
++        void updateLook(float now, float yaw, float pitch, boolean seated) {
++            if (!seated) { lookAge = Float.NaN; return; }
++            if (Float.isNaN(lookAge) || now < lookAge || now - lookAge > 10) {
++                lookYaw = yaw;
++                lookPitch = pitch;
++            } else {
++                float dt = Mth.clamp(now - lookAge, 0, 3);
++                lookYaw = Mth.approachDegrees(lookYaw, yaw, dt * 2.5f);
++                lookPitch = Mth.approach(lookPitch, pitch, dt * 2.5f);
++            }
++            lookAge = now;
++        }
+     }
+ }
+diff --git a/java/com/stevesarmy/combat/SbwVehicleGunnery.java b/java/com/stevesarmy/combat/SbwVehicleGunnery.java
+index f739fc3..ce49bc7 100644
+--- a/java/com/stevesarmy/combat/SbwVehicleGunnery.java
++++ b/java/com/stevesarmy/combat/SbwVehicleGunnery.java
+@@ -2,11 +2,14 @@ package com.stevesarmy.combat;
+ 
+ import com.stevesarmy.StevesArmyConfig;
+ import com.stevesarmy.compat.SbwCompat;
++import com.stevesarmy.compat.sbw.SbwVehicles;
+ import com.stevesarmy.entity.SoldierEntity;
+ import com.stevesarmy.entity.SoldierRole;
++import com.stevesarmy.vehicle.VehicleWeaponController;
+ import net.minecraft.server.level.ServerLevel;
+ import net.minecraft.world.entity.Entity;
+ import net.minecraft.world.entity.LivingEntity;
++import net.minecraft.world.phys.Vec3;
+ 
+ import java.util.Comparator;
+ import java.util.HashMap;
+@@ -18,11 +21,9 @@ import java.util.UUID;
+  * Spotter AI for dedicated vehicle crew mounted on Superb Warfare vehicles. While a soldier is
+  * a passenger, {@code VS2Compat.prepareSoldierAi} freezes its goal system — but
+  * SBW's native mob-crew gunnery fires the vehicle's turret and seat weapons at
+- * whatever LivingEntity the riding Mob targets ({@code setTarget} is mirrored
+- * into the vehicle's {@code aiTurretTargetUUID} and auto-fired at the weapon's
+- * RPM with ballistic lead). This ticker therefore keeps exactly one thing alive
+- * while the crew member's own AI is frozen: target acquisition. No movement,
+- * no cover, no handheld firing — the crew member is a pure spotter; SBW shoots.
++ * the riding Mob's target. Keep spotting and weapon selection alive while the
++ * soldier's normal movement/cover AI is frozen. SBW handles the actual shots,
++ * ballistic lead and RPM; this mod must not double-fire those weapons.
+  * Ordinary infantry use {@link MountedSoldierGunnery} only in seats that permit
+  * handheld weapons.
+  *
+@@ -63,35 +64,42 @@ public final class SbwVehicleGunnery {
+         }
+ 
+         Long last = lastRetargetBySoldier.get(soldierId);
+-        if (last != null && gameTime - last < RETARGET_INTERVAL_TICKS) {
+-            return;
+-        }
+-        lastRetargetBySoldier.put(soldierId, gameTime);
+-        pruneIfNeeded(gameTime);
++        if (last == null || gameTime - last >= RETARGET_INTERVAL_TICKS) {
++            lastRetargetBySoldier.put(soldierId, gameTime);
++            pruneIfNeeded(gameTime);
+ 
+-        // Keep a still-valid target rather than flip-flopping between equals.
+-        if (current != null && current.isAlive() && isValidSpottingTarget(soldier, current)) {
+-            return;
++            if (current == null) {
++                double range = StevesArmyConfig.VEHICLE_CREW_DETECTION_DISTANCE.get();
++                List<LivingEntity> targets = serverLevel.getEntitiesOfClass(LivingEntity.class,
++                    soldier.getBoundingBox().inflate(range),
++                    t -> isValidSpottingTarget(soldier, t));
++                current = targets.stream()
++                    .min(Comparator.comparingDouble(soldier::distanceToSqr))
++                    .orElse(null);
++                if (current != null) soldier.setTarget(current);
++            }
+         }
+ 
+-        double range = StevesArmyConfig.getBasicDetectionDistance();
+-        List<LivingEntity> targets = serverLevel.getEntitiesOfClass(LivingEntity.class,
+-            soldier.getBoundingBox().inflate(range),
+-            t -> t.isAlive() && isValidSpottingTarget(soldier, t));
+-        LivingEntity nearest = targets.stream()
+-            .min(Comparator.comparingDouble(soldier::distanceToSqr))
+-            .orElse(null);
+-        if (nearest != null) {
+-            soldier.setTarget(nearest);
++        int seat = SbwVehicles.seatIndexOf(mount, soldier);
++        if (seat >= 0) {
++            SbwVehicles.syncAutoTarget(mount, seat, current);
++            VehicleWeaponController.tickMounted(soldier, mount, seat, current);
+         }
+     }
+ 
+-    /** Ordinary targeting rules plus a sight check — the gun must actually be able to engage it. */
++    /** Spot from the vehicle's muzzle, not the crew's eye inside an enclosed hull. */
+     private static boolean isValidSpottingTarget(SoldierEntity soldier, LivingEntity target) {
+-        return target != soldier
+-            && !soldier.isFriendlyTo(target)
+-            && TargetAcquisition.isValidTarget(soldier, target)
+-            && TargetAcquisition.hasLineOfSightToPosition(soldier, target.getEyePosition());
++        Entity vehicle = soldier.getVehicle();
++        if (vehicle == null || target == soldier || target.getVehicle() == vehicle
++            || target.level() != soldier.level() || !TargetAcquisition.isValidTarget(soldier, target)
++            || soldier.isFriendlyTo(target) || !soldier.isProactiveTarget(target)) return false;
++        int seat = SbwVehicles.seatIndexOf(vehicle, soldier);
++        Vec3 origin = seat >= 0 && SbwVehicles.seatHasWeapon(vehicle, seat)
++            ? SbwVehicles.shootPos(vehicle, seat) : soldier.getEyePosition();
++        Entity targetVehicle = target.getVehicle();
++        Vec3 aimPoint = SbwCompat.isVehicle(targetVehicle)
++            ? targetVehicle.getBoundingBox().getCenter() : target.getEyePosition();
++        return VisibilityRay.trace(soldier.level(), origin, aimPoint, soldier).hasContact();
+     }
+ 
+     private static void pruneIfNeeded(long gameTime) {
+diff --git a/java/com/stevesarmy/compat/sbw/SbwTurret.java b/java/com/stevesarmy/compat/sbw/SbwTurret.java
+deleted file mode 100644
+index bb7721a..0000000
+--- a/java/com/stevesarmy/compat/sbw/SbwTurret.java
++++ /dev/null
+@@ -1,55 +0,0 @@
+-package com.stevesarmy.compat.sbw;
+-
+-import net.minecraft.world.entity.Entity;
+-import net.minecraft.world.phys.Vec3;
+-
+-/**
+- * Turret aiming helper.
+- *
+- * {@link SbwVehicles#aimWeapon} only knows one SBW helper name. When that name
+- * is absent on a given vehicle class the call silently does nothing, which is
+- * why an idle tank turret never moved. This wrapper keeps the existing call as
+- * the primary path and adds direct turret rotation setters as a fallback, so
+- * the gun actually traverses on every SBW hull.
+- */
+-public final class SbwTurret {
+-
+-    private static final String UTILS = "com.atsuishio.superbwarfare.entity.vehicle.utils.VehicleWeaponUtils";
+-
+-    private SbwTurret() {
+-    }
+-
+-    /** Aim the given seat's weapon along a direction vector. */
+-    public static void aim(Entity vehicle, int seatIndex, Vec3 direction) {
+-        if (vehicle == null || direction == null) return;
+-        SbwVehicles.aimWeapon(vehicle, seatIndex, direction);
+-
+-        if (seatIndex != SbwVehicles.turretControllerIndex(vehicle)) return;
+-        Class<?> utils = SbwReflection.cls(UTILS);
+-        if (utils != null) {
+-            SbwReflection.callStatic(utils,
+-                new String[]{"turretAutoAimFromVector", "turretAutoAim", "autoAimFromVector"},
+-                vehicle, direction);
+-        }
+-    }
+-
+-    /** Aim the turret at absolute world angles, degrees. */
+-    public static void aimAngles(Entity vehicle, int seatIndex, float yaw, float pitch) {
+-        if (vehicle == null) return;
+-        aim(vehicle, seatIndex, Vec3.directionFromRotation(pitch, yaw));
+-        // Direct setters, present on SBW turret vehicles. A missing method is a
+-        // silent no op in the reflection layer, so this is safe everywhere.
+-        SbwReflection.call(vehicle, new String[]{"setTurretYRot", "setTurretYaw"}, yaw);
+-        SbwReflection.call(vehicle, new String[]{"setTurretXRot", "setTurretPitch"}, pitch);
+-    }
+-
+-    public static float turretYaw(Entity vehicle) {
+-        return SbwReflection.asFloat(
+-            SbwReflection.get(vehicle, "turretYRot", "getTurretYRot"), vehicle.getYRot());
+-    }
+-
+-    public static float turretPitch(Entity vehicle) {
+-        return SbwReflection.asFloat(
+-            SbwReflection.get(vehicle, "turretXRot", "getTurretXRot"), 0.0f);
+-    }
+-}
+diff --git a/java/com/stevesarmy/compat/sbw/SbwVehicles.java b/java/com/stevesarmy/compat/sbw/SbwVehicles.java
+index f2618fb..257fb50 100644
+--- a/java/com/stevesarmy/compat/sbw/SbwVehicles.java
++++ b/java/com/stevesarmy/compat/sbw/SbwVehicles.java
+@@ -114,6 +114,12 @@ public final class SbwVehicles {
+         return !seatWeapons(vehicle, seatIndex).isEmpty();
+     }
+ 
++    public static boolean seatAllowsHeadRotation(Entity vehicle, int seatIndex) {
++        Object seat = seatInfo(vehicle, seatIndex);
++        return seat != null && SbwReflection.asBool(
++            SbwReflection.get(seat, "canRotateHead", "getCanRotateHead", "isCanRotateHead"), true);
++    }
++
+     public static String getGunName(Entity vehicle, int seatIndex) {
+         if (isDrone(vehicle)) return null;
+         Object res = SbwReflection.call(vehicle, new String[]{"getGunName"}, seatIndex);
+@@ -132,6 +138,27 @@ public final class SbwVehicles {
+         SbwReflection.call(vehicle, new String[]{"setWeaponIndex"}, seatIndex, weaponIndex);
+     }
+ 
++    public static boolean weaponReloading(Entity vehicle, int seatIndex, int weaponIndex) {
++        Object gun = SbwReflection.call(vehicle, new String[]{"getGunData"}, seatIndex, weaponIndex);
++        return SbwReflection.asBool(SbwReflection.call(gun, new String[]{"reloading", "isReloading"}), false);
++    }
++
++    public static boolean weaponReady(Entity vehicle, int seatIndex, int weaponIndex) {
++        List<String> weapons = seatWeapons(vehicle, seatIndex);
++        if (weaponIndex < 0 || weaponIndex >= weapons.size()
++            || weaponReloading(vehicle, seatIndex, weaponIndex)) return false;
++
++        Object gun = SbwReflection.call(vehicle, new String[]{"getGunData"}, seatIndex, weaponIndex);
++        if (gun != null) {
++            // SBW's canShoot accounts for energy weapons, cooldown and ammo cost.
++            Object canShoot = SbwReflection.call(gun, new String[]{"canShoot"}, vehicle);
++            if (canShoot instanceof Boolean ready) return ready;
++        }
++        Object ammo = SbwReflection.call(vehicle, new String[]{"getAmmoCount"}, weapons.get(weaponIndex));
++        return SbwReflection.asInt(ammo, weaponIndex == weaponIndex(vehicle, seatIndex)
++            ? ammoCount(vehicle, seatIndex) : 0) > 0;
++    }
++
+     // -- health & fuel --------------------------------------------------------
+ 
+     public static float health(Entity vehicle) {
+@@ -256,16 +283,42 @@ public final class SbwVehicles {
+ 
+     public static void aimWeapon(Entity vehicle, int seatIndex, Vec3 aimVec) {
+         if (!SbwCompat.isVehicle(vehicle) || isDrone(vehicle) || aimVec == null) return;
+-        Class<?> utilsClass = SbwReflection.cls("com.atsuishio.superbwarfare.entity.vehicle.utils.VehicleWeaponUtils");
+-        if (utilsClass == null) return;
+         int turretIdx = turretControllerIndex(vehicle);
+         int weaponStationIdx = passengerWeaponStationControllerIndex(vehicle);
+ 
+         if (seatIndex == turretIdx) {
+-            SbwReflection.callStatic(utilsClass, new String[]{"turretAutoAimFromVector"}, vehicle, aimVec);
++            if (SbwReflection.invoke(vehicle, new String[]{"turretAutoAimFromVector"}, aimVec)) return;
+         } else if (seatIndex == weaponStationIdx) {
+-            SbwReflection.callStatic(utilsClass, new String[]{"passengerWeaponAutoAimFormVector"}, vehicle, aimVec);
++            if (SbwReflection.invoke(vehicle, new String[]{"passengerWeaponAutoAimFormVector"}, aimVec)) return;
++        } else {
++            return;
+         }
++
++        Class<?> utilsClass = SbwReflection.cls("com.atsuishio.superbwarfare.entity.vehicle.utils.VehicleWeaponUtils");
++        if (utilsClass != null) {
++            SbwReflection.callStatic(utilsClass,
++                new String[]{seatIndex == turretIdx ? "turretAutoAimFromVector" : "passengerWeaponAutoAimFormVector"},
++                vehicle, aimVec);
++        }
++    }
++
++    /** SBW normally mirrors Mob.setTarget through an event, but a target may predate boarding. */
++    public static void syncAutoTarget(Entity vehicle, int seatIndex, LivingEntity target) {
++        if (!SbwCompat.isVehicle(vehicle) || isDrone(vehicle)) return;
++        String id = target == null ? "undefined" : target.getStringUUID();
++        if (seatIndex == turretControllerIndex(vehicle)) {
++            SbwReflection.set(vehicle, id, "aiTurretTargetUUID");
++        } else if (seatIndex == passengerWeaponStationControllerIndex(vehicle)) {
++            SbwReflection.set(vehicle, id, "aiPassengerWeaponTargetUUID");
++        }
++    }
++
++    public static float turretMinPitch(Entity vehicle) {
++        return SbwReflection.asFloat(SbwReflection.get(vehicle, "turretMinPitch", "getTurretMinPitch"), -10.0f);
++    }
++
++    public static float turretMaxPitch(Entity vehicle) {
++        return SbwReflection.asFloat(SbwReflection.get(vehicle, "turretMaxPitch", "getTurretMaxPitch"), 20.0f);
+     }
+ 
+     public static boolean shoot(Entity vehicle, LivingEntity gunner, UUID targetId, Vec3 targetPos) {
+@@ -305,7 +358,7 @@ public final class SbwVehicles {
+             return Kind.AIRCRAFT;
+         }
+         if (n.contains("tank") || n.contains("m1a2") || n.contains("t90")
+-            || n.contains("ztz") || n.contains("bmp") || n.contains("yx100")
++            || n.contains("ztz") || n.contains("bmp") || n.contains("bradley") || n.contains("yx100")
+             || n.contains("prism") || n.contains("type63")) {
+             return Kind.TRACKED;
+         }
+diff --git a/java/com/stevesarmy/entity/SoldierEntity.java b/java/com/stevesarmy/entity/SoldierEntity.java
+index 64631ff..532c321 100644
+--- a/java/com/stevesarmy/entity/SoldierEntity.java
++++ b/java/com/stevesarmy/entity/SoldierEntity.java
+@@ -1713,6 +1713,8 @@ public class SoldierEntity extends PathfinderMob implements Container {
+             // SBW passengers are real taxi riders: keep them seated and freeze
+             // movement AI. Dedicated crew spots for the vehicle weapons; other
+             // passengers can fire their handheld gun from seats that allow it.
++            // Head and body rotation of seated soldiers has a single owner.
++            com.stevesarmy.vehicle.VehicleCrewPose.ensureTracked(this);
+             if (getRole() == SoldierRole.VEHICLE_CREW) {
+                 SbwVehicleGunnery.tickMounted(this);
+             } else {
+@@ -2690,7 +2692,9 @@ public BlockPos getPingMoveTarget() {
+     }
+ 
+     private void updateCrawlFacing() {
+-        if (!isCrawlMoving()) {
++        // A seated soldier is carried by its vehicle; writing body/head yaw here snapped
++        // the neck for the tick or two before the low-crouch flag is cleared on mounting.
++        if (!isCrawlMoving() || isMountedInSbwVehicle()) {
+             return;
+         }
+ 
+diff --git a/java/com/stevesarmy/vehicle/VehicleCrewPose.java b/java/com/stevesarmy/vehicle/VehicleCrewPose.java
+index 8f2f970..690d8ff 100644
+--- a/java/com/stevesarmy/vehicle/VehicleCrewPose.java
++++ b/java/com/stevesarmy/vehicle/VehicleCrewPose.java
+@@ -50,7 +50,15 @@ public final class VehicleCrewPose {
+     /** Ignore corrections smaller than this, the source of the micro shake. */
+     private static final float DEAD_ZONE = 0.6f;
+     private static final float HEAD_ARC = 70.0f;
++    /** Seats that are sealed inside the hull but still allow looking around. */
++    private static final float ENCLOSED_HEAD_ARC = 40.0f;
+     private static final float PITCH_ARC = 35.0f;
++    /**
++     * How long a lost target keeps its bearing before the crew goes back to idle
++     * scanning. Targets flicker in and out of sight, and flipping the desired yaw
++     * every few ticks is what made necks twitch.
++     */
++    private static final int TARGET_HOLD_TICKS = 40;
+ 
+     private static final Map<UUID, Pose> POSES = new ConcurrentHashMap<>();
+     private static final Map<UUID, WeakReference<SoldierEntity>> MOUNTED = new ConcurrentHashMap<>();
+@@ -63,6 +71,9 @@ public final class VehicleCrewPose {
+         float headYawPrevious;
+         float pitch;
+         float pitchPrevious;
++        float heldYaw;
++        float heldPitch;
++        int holdTicks;
+         final float phase;
+ 
+         Pose(float yaw, float phase) {
+@@ -85,6 +96,17 @@ public final class VehicleCrewPose {
+         }
+     }
+ 
++    /**
++     * Mount events are not replayed when a chunk reloads with soldiers already seated, so a
++     * hull driven by a player lost its crew pose authority and the vanilla head turn fought
++     * SBW again. The soldier calls this every tick while seated; it is a cheap map check.
++     */
++    public static void ensureTracked(SoldierEntity soldier) {
++        if (soldier == null || soldier.level().isClientSide) return;
++        UUID id = soldier.getUUID();
++        if (!MOUNTED.containsKey(id)) MOUNTED.put(id, new WeakReference<>(soldier));
++    }
++
+     @SubscribeEvent
+     public static void onServerTick(TickEvent.ServerTickEvent event) {
+         if (event.phase != TickEvent.Phase.END) return;
+@@ -133,6 +155,18 @@ public final class VehicleCrewPose {
+         float desiredYaw;
+         float desiredPitch;
+ 
++        // Seat rules: a seat that cannot rotate the head keeps it dead ahead, a seat sealed
++        // inside the hull gets a short arc so the head does not clip through armour.
++        float arc = HEAD_ARC;
++        int seat = SbwVehicles.seatIndexOf(vehicle, soldier);
++        if (seat >= 0) {
++            if (!SbwVehicles.seatAllowsHeadRotation(vehicle, seat)) {
++                arc = 0.0f;
++            } else if (!SbwVehicles.seatAllowsHandheld(vehicle, seat)) {
++                arc = ENCLOSED_HEAD_ARC;
++            }
++        }
++
+         LivingEntity target = soldier.getTarget();
+         boolean tracking = target != null && target.isAlive()
+             && soldier.distanceToSqr(target) < 256.0 * 256.0;
+@@ -142,6 +176,14 @@ public final class VehicleCrewPose {
+             double flat = Math.sqrt(toTarget.x * toTarget.x + toTarget.z * toTarget.z);
+             desiredYaw = (float) Math.toDegrees(Math.atan2(-toTarget.x, toTarget.z));
+             desiredPitch = (float) -Math.toDegrees(Math.atan2(toTarget.y, Math.max(0.01, flat)));
++            pose.heldYaw = desiredYaw;
++            pose.heldPitch = desiredPitch;
++            pose.holdTicks = TARGET_HOLD_TICKS;
++        } else if (pose.holdTicks > 0) {
++            // Target just dropped out: keep looking where it was instead of snapping to idle.
++            pose.holdTicks--;
++            desiredYaw = pose.heldYaw;
++            desiredPitch = pose.heldPitch;
+         } else {
+             // Idle: two slow sines, never repeating in step, so the crew reads
+             // as alive without a single abrupt movement.
+@@ -150,9 +192,10 @@ public final class VehicleCrewPose {
+             desiredPitch = (float) (Math.sin(time * 0.23) * 4.0);
+         }
+ 
+-        float relative = Mth.clamp(Mth.wrapDegrees(desiredYaw - hullYaw), -HEAD_ARC, HEAD_ARC);
++        float relative = Mth.clamp(Mth.wrapDegrees(desiredYaw - hullYaw), -arc, arc);
+         desiredYaw = Mth.wrapDegrees(hullYaw + relative);
+         desiredPitch = Mth.clamp(desiredPitch, -PITCH_ARC, PITCH_ARC);
++        if (arc <= 0.0f) desiredPitch = 0.0f;
+ 
+         pose.headYawPrevious = pose.headYaw;
+         pose.pitchPrevious = pose.pitch;
+diff --git a/java/com/stevesarmy/vehicle/VehicleDriver.java b/java/com/stevesarmy/vehicle/VehicleDriver.java
+index 52b3fab..3b3d486 100644
+--- a/java/com/stevesarmy/vehicle/VehicleDriver.java
++++ b/java/com/stevesarmy/vehicle/VehicleDriver.java
+@@ -29,8 +29,12 @@ import java.util.UUID;
+  *     instead of a visible chain of goals;
+  *   - speed is governed by a measured deceleration estimate, so the hull stops
+  *     on the point at 0.2 blocks/tick and at 1.4 blocks/tick alike;
+- *   - every stop reason (destination, follow gap, friendly in the lane, corner)
+- *     is expressed as "metres of road left", never as a latched brake flag.
++ *   - every stop reason (destination, follow gap, friendly vehicle in the lane,
++ *     corner) is expressed as "metres of road left", never as a latched brake flag;
++ *   - friendly infantry never stop the hull: friendly fire is off, so the driver
++ *     only eases around them and otherwise just keeps rolling;
++ *   - a hull whose gunner cannot bring the main gun to bear (target inside the
++ *     barrel dead zone, or outside the elevation limits) backs away from it.
+  */
+ public final class VehicleDriver {
+ 
+@@ -87,6 +91,15 @@ public final class VehicleDriver {
+     private int reverseTicks = 0;
+     private boolean throttleCommanded;
+ 
++    /** True once this driver has written inputs the hull may still be holding. */
++    private boolean controlsDirty;
++
++    /** Backing away from a target the main gun cannot reach. */
++    private boolean closeRetreating;
++    private boolean retreatReversing;
++    private boolean retreatReverseClear;
++    private int retreatPathCooldown;
++
+     VehicleDriver(Entity vehicle) {
+         this.vehicleRef = new WeakReference<>(vehicle);
+         this.previousYaw = vehicle.getYRot();
+@@ -121,6 +134,7 @@ public final class VehicleDriver {
+         this.mode = VehicleDriveMode.GO_TO;
+         this.destination = pos;
+         this.followTarget = new WeakReference<>(null);
++        this.closeRetreating = false;
+         clearAttack();
+         clearPath();
+     }
+@@ -146,6 +160,7 @@ public final class VehicleDriver {
+ 
+     public void orderDismount() {
+         this.mode = VehicleDriveMode.DISMOUNT;
++        this.closeRetreating = false;
+         clearAttack();
+         clearPath();
+         releaseControls();
+@@ -209,7 +224,9 @@ public final class VehicleDriver {
+ 
+         handedOver = false;
+         SbwVehicles.ensureFuel(vehicle);
+-        VehicleWeaponController.tick(this, vehicle);
++        // Weapons are not driven from here any more. SBW fires at the gunner's target
++        // natively, and SbwVehicleGunnery keeps that target, the weapon choice and the
++        // idle turret scan alive every tick, independent of any attack order.
+         sampleDynamics(vehicle);
+ 
+         // Reaching this point already proves the soldier is dedicated crew.
+@@ -243,6 +260,11 @@ public final class VehicleDriver {
+         }
+ 
+         throttleCommanded = false;
++        if (mode != VehicleDriveMode.DISMOUNT && mode != VehicleDriveMode.GO_TO
++            && retreatFromUnreachableTarget(vehicle)) {
++            trackStall(vehicle);
++            return true;
++        }
+         switch (mode) {
+             case FOLLOW -> tickFollow(vehicle);
+             case GO_TO -> tickGoTo(vehicle);
+@@ -277,10 +299,18 @@ public final class VehicleDriver {
+     private void handOverControls(Entity vehicle) {
+         if (!handedOver) {
+             handedOver = true;
+-            SbwVehicles.clearInputs(vehicle);
++            // Only zero the inputs when this driver actually put something there. A driver
++            // that was just (re)registered for a hull a player is steering has written
++            // nothing, and zeroing anyway wiped the player's keys, which also killed the
++            // engine sound until the vehicle was re-entered.
++            if (controlsDirty) {
++                SbwVehicles.clearInputs(vehicle);
++                controlsDirty = false;
++            }
+             VehicleWeaponController.forget(vehicle);
+         }
+         clearPath();
++        closeRetreating = false;
+         mode = VehicleDriveMode.IDLE;
+     }
+ 
+@@ -299,6 +329,16 @@ public final class VehicleDriver {
+             brake(vehicle);
+             return;
+         }
++        followTarget = new WeakReference<>(lead);
++
++        // Whoever rides or stands on the hull is already exactly where we would drive to.
++        // Chasing them (or backing off from them) is what made the tank slide away from a
++        // player standing on it.
++        if (lead == vehicle || lead.getVehicle() == vehicle || standingOnVehicle(lead, vehicle)) {
++            clearPath();
++            brake(vehicle);
++            return;
++        }
+ 
+         Entity ahead = VehicleConvoy.vehicleAheadOf(vehicle, lead);
+         Entity target = ahead != null ? ahead : lead;
+@@ -308,18 +348,24 @@ public final class VehicleDriver {
+             VehicleConvoy.safeFollowDistance(vehicle, target));
+         double gap = horizontalDistance(vehicle.position(), target.position());
+ 
+-        // Inside the dead band simply hold station: no path, no twitching.
++        // Inside the dead band simply hold station: no path, no twitching, and never
++        // reverse. Walking up to a tank must not make it drive away from you.
+         if (gap <= stopDistance + FOLLOW_SLACK) {
+-            if (gap < stopDistance * 0.55 && vehicle.getDeltaMovement().horizontalDistance() < 0.2) {
+-                reverse(vehicle);
+-            } else {
+-                brake(vehicle);
+-            }
++            brake(vehicle);
+             return;
+         }
+         driveAlong(vehicle, target.position(), stopDistance, gap > stopDistance + 14.0);
+     }
+ 
++    /** True for an entity standing on the roof or deck of the hull rather than riding in it. */
++    private static boolean standingOnVehicle(Entity entity, Entity vehicle) {
++        AABB hull = vehicle.getBoundingBox();
++        return entity.getX() >= hull.minX - 0.5 && entity.getX() <= hull.maxX + 0.5
++            && entity.getZ() >= hull.minZ - 0.5 && entity.getZ() <= hull.maxZ + 0.5
++            && entity.getY() >= hull.minY + Math.min(1.0, hull.getYsize() * 0.3)
++            && entity.getY() <= hull.maxY + 3.0;
++    }
++
+     private void tickGoTo(Entity vehicle) {
+         if (destination == null) {
+             mode = VehicleDriveMode.IDLE;
+@@ -375,6 +421,102 @@ public final class VehicleDriver {
+         return attackTargetId;
+     }
+ 
++    // -- unreachable target handling -------------------------------------------
++
++    /**
++     * A turret cannot depress its barrel into an enemy that is right in front of the hull,
++     * nor elevate it at one standing above it. Trying to aim through that dead zone just
++     * leaves the gun idle while the enemy shoots, so the hull backs out of it instead.
++     * Returns true while it owns the controls this tick.
++     */
++    private boolean retreatFromUnreachableTarget(Entity vehicle) {
++        if (mode == VehicleDriveMode.FOLLOW) {
++            Entity lead = followTarget.get();
++            if (lead == null && driverSoldier() != null) lead = driverSoldier().getOwner();
++            // Never shove off somebody who is riding or standing on the hull.
++            if (lead != null && (lead.getVehicle() == vehicle || standingOnVehicle(lead, vehicle))) {
++                closeRetreating = false;
++                return false;
++            }
++        }
++        if (SbwVehicles.kind(vehicle) != SbwVehicles.Kind.TRACKED) {
++            closeRetreating = false;
++            return false;
++        }
++        int turretSeat = SbwVehicles.turretControllerIndex(vehicle);
++        Entity controller = SbwVehicles.passengerAt(vehicle, turretSeat);
++        if (!(controller instanceof SoldierEntity gunner) || !SbwVehicles.seatHasWeapon(vehicle, turretSeat)) {
++            closeRetreating = false;
++            return false;
++        }
++        LivingEntity enemy = gunner.getTarget();
++        if (enemy == null || !enemy.isAlive() || gunner.isFriendlyTo(enemy)
++            || !gunner.isProactiveTarget(enemy) || enemy.getVehicle() == vehicle) {
++            closeRetreating = false;
++            return false;
++        }
++
++        Entity targetVehicle = enemy.getVehicle();
++        Vec3 enemyPos = com.stevesarmy.compat.SbwCompat.isVehicle(targetVehicle)
++            ? targetVehicle.getBoundingBox().getCenter() : enemy.getBoundingBox().getCenter();
++        Vec3 muzzle = SbwVehicles.shootPos(vehicle, turretSeat);
++        double separation = horizontalDistance(vehicle.position(), enemyPos);
++        double minRange = Math.max(6.0, VehiclePathfinder.footprintRadius(vehicle) + 3.0);
++        double muzzleDistance = horizontalDistance(muzzle, enemyPos);
++        double elevation = Math.toDegrees(Math.atan2(enemyPos.y - muzzle.y, Math.max(0.1, muzzleDistance)));
++        boolean outsidePitch = separation < 20.0
++            && (elevation < SbwVehicles.turretMinPitch(vehicle) - 1.5
++                || elevation > SbwVehicles.turretMaxPitch(vehicle) + 1.5);
++
++        // Hysteresis: once backing off, keep going until there is a clear margin.
++        if (separation >= minRange + (closeRetreating ? 3.0 : 0.0) && !outsidePitch) {
++            if (closeRetreating) clearPath();
++            closeRetreating = false;
++            retreatReversing = false;
++            return false;
++        }
++
++        if (!closeRetreating) {
++            clearPath();
++            retreatPathCooldown = 0;
++            retreatReverseClear = false;
++        }
++        closeRetreating = true;
++
++        Vec3 away = horizontal(vehicle.position().subtract(enemyPos));
++        if (away.lengthSqr() < 0.01) away = horizontal(vehicle.getForward());
++        if (away.lengthSqr() < 1.0E-4) return false;
++        away = away.normalize();
++
++        Vec3 forward = horizontal(vehicle.getForward());
++        if (forward.lengthSqr() > 1.0E-4) {
++            forward = forward.normalize();
++            // Enemy ahead of the nose: reversing straight back is the quickest way out
++            // and keeps the front armour toward it.
++            if (forward.dot(away) < -0.4 && friendlyRoomAhead(vehicle, forward.scale(-1.0)) > 6.0) {
++                if (--retreatPathCooldown <= 0) {
++                    retreatPathCooldown = 12;
++                    Vec3 back = vehicle.position().subtract(forward.scale(8.0));
++                    retreatReverseClear = VehiclePathfinder.isClearLine(vehicle.level(), vehicle.position(),
++                        back, VehiclePathfinder.footprintRadius(vehicle),
++                        VehiclePathfinder.footprintHeight(vehicle));
++                }
++                if (retreatReverseClear) {
++                    retreatReversing = true;
++                    reverse(vehicle);
++                    return true;
++                }
++            } else {
++                retreatPathCooldown = 0;
++            }
++        }
++
++        retreatReversing = false;
++        Vec3 safePoint = vehicle.position().add(away.scale(12.0));
++        driveAlong(vehicle, safePoint, 0.0, false);
++        return true;
++    }
++
+     // -- driving --------------------------------------------------------------
+ 
+     /**
+@@ -397,9 +539,10 @@ public final class VehicleDriver {
+         double speed = vehicle.getDeltaMovement().horizontalDistance();
+         double remaining = Math.max(0.0, pathRemaining(vehicle, goal) - stopShort);
+ 
+-        // Friendly entities in the lane become a closer stop point rather than
+-        // an on/off brake, which is what used to end in a rear end collision.
+-        double friendlyRoom = friendlyRoomAhead(vehicle);
++        // Friendly vehicles in the lane become a closer stop point rather than an
++        // on/off brake, which is what used to end in a rear end collision. Infantry
++        // are deliberately not part of this: they are steered around, never waited for.
++        double friendlyRoom = friendlyRoomAhead(vehicle, horizontal(vehicle.getForward()));
+         if (friendlyRoom < remaining) remaining = friendlyRoom;
+ 
+         if (remaining <= 0.25) {
+@@ -437,6 +580,7 @@ public final class VehicleDriver {
+     }
+ 
+     private void flyTo(Entity vehicle, Vec3 goal) {
++        controlsDirty = true;
+         if (!steer(vehicle, goal, true, true)) {
+             SbwVehicles.up(vehicle, false);
+             SbwVehicles.down(vehicle, false);
+@@ -467,6 +611,7 @@ public final class VehicleDriver {
+         // steering away from it. Small and continuous, so it reads as a driver
+         // easing around a rock rather than a new goal being chosen.
+         error += avoidanceBias(vehicle, direction, (float) Math.abs(error));
++        error += infantryBias(vehicle, direction, (float) Math.abs(error));
+         error = Mth.wrapDegrees(error);
+ 
+         boolean turnLeft = error < -STEER_DEADZONE_DEGREES;
+@@ -476,6 +621,7 @@ public final class VehicleDriver {
+         boolean sprint = allowSprint && forward && Math.abs(error) < 9.0f && distance > 8.0;
+ 
+         SbwVehicles.updateInputs(vehicle, forward, false, turnLeft, turnRight, sprint);
++        controlsDirty = true;
+         throttleCommanded = forward || sprint;
+         brakedLastTick = false;
+ 
+@@ -503,19 +649,24 @@ public final class VehicleDriver {
+         boolean movingForward = along > 0.04;
+         boolean movingBack = along < -0.04;
+         SbwVehicles.updateInputs(vehicle, movingBack, movingForward, false, false, false);
++        controlsDirty = true;
+         throttleCommanded = false;
+         brakedLastTick = movingForward || movingBack;
+     }
+ 
+     private void reverse(Entity vehicle) {
+         SbwVehicles.updateInputs(vehicle, false, true, false, false, false);
++        controlsDirty = true;
+         throttleCommanded = true;
+         brakedLastTick = false;
+     }
+ 
+     private void releaseControls() {
+         Entity vehicle = vehicle();
+-        if (vehicle != null) SbwVehicles.clearInputs(vehicle);
++        if (vehicle != null) {
++            SbwVehicles.clearInputs(vehicle);
++            controlsDirty = true;
++        }
+         throttleCommanded = false;
+     }
+ 
+@@ -675,14 +826,15 @@ public final class VehicleDriver {
+     // -- obstacles ------------------------------------------------------------
+ 
+     /**
+-     * Blocks of clear road before the nearest friendly entity in the lane.
+-     * Returned as a distance so the speed controller can ease off instead of
+-     * stamping the brake.
++     * Blocks of clear road before the nearest friendly <em>vehicle</em> in the given
++     * direction. Returned as a distance so the speed controller can ease off instead of
++     * stamping the brake. Infantry are excluded on purpose: they cannot be hurt by the
++     * hull (friendly fire is off) and waiting for them to leave the lane deadlocked tanks
++     * in crowded squads.
+      */
+-    private double friendlyRoomAhead(Entity vehicle) {
++    private double friendlyRoomAhead(Entity vehicle, Vec3 direction) {
+         SoldierEntity soldier = driverSoldier();
+         if (soldier == null) return Double.MAX_VALUE;
+-        Vec3 direction = horizontal(vehicle.getForward());
+         if (direction.lengthSqr() < 1.0E-4) return Double.MAX_VALUE;
+         direction = direction.normalize();
+ 
+@@ -696,7 +848,7 @@ public final class VehicleDriver {
+         double closest = Double.MAX_VALUE;
+         for (Entity candidate : vehicle.level().getEntities(vehicle, corridor)) {
+             if (candidate == vehicle || candidate == soldier || candidate.getVehicle() == vehicle) continue;
+-            if (!isFriendlyObstacle(soldier, candidate)) continue;
++            if (!isFriendlyVehicle(soldier, candidate)) continue;
+ 
+             Vec3 offset = horizontal(candidate.getBoundingBox().getCenter().subtract(origin));
+             double along = offset.dot(direction);
+@@ -711,6 +863,50 @@ public final class VehicleDriver {
+         return Math.max(0.0, closest);
+     }
+ 
++    /**
++     * Gentle steering offset (degrees, positive = turn right) away from the nearest
++     * friendly infantry in the lane. It never brakes and never blocks: if the soldier does
++     * not move the hull just rolls on, which is acceptable because friendly fire is off.
++     */
++    private float infantryBias(Entity vehicle, Vec3 direction, float currentError) {
++        if (currentError > 45.0f) return 0.0f;
++        SoldierEntity soldier = driverSoldier();
++        if (soldier == null) return 0.0f;
++
++        double speed = vehicle.getDeltaMovement().horizontalDistance();
++        double reach = Mth.clamp(6.0 + speed * 20.0, 6.0, 16.0);
++        AABB hull = vehicle.getBoundingBox();
++        AABB corridor = hull.expandTowards(direction.scale(reach)).inflate(1.0, 1.5, 1.0);
++        Vec3 origin = hull.getCenter();
++        // yaw + 90 degrees: positive offsets are on the hull's right.
++        Vec3 rightAxis = new Vec3(-direction.z, 0.0, direction.x);
++
++        double nearest = Double.MAX_VALUE;
++        float bias = 0.0f;
++        for (Entity candidate : vehicle.level().getEntities(vehicle, corridor)) {
++            if (!(candidate instanceof LivingEntity living) || candidate == soldier
++                || candidate.getVehicle() == vehicle || !soldier.isFriendlyTo(living)) continue;
++            if (standingOnVehicle(candidate, vehicle)) continue;
++
++            Vec3 offset = horizontal(candidate.getBoundingBox().getCenter().subtract(origin));
++            double along = offset.dot(direction);
++            if (along <= 0.0 || along > reach || along >= nearest) continue;
++            if (Math.abs(candidate.getY() - vehicle.getY()) > 3.0) continue;
++
++            double lateral = offset.dot(rightAxis);
++            double clearance = vehicle.getBbWidth() / 2.0 + candidate.getBbWidth() / 2.0 + 0.75;
++            if (Math.abs(lateral) > clearance) continue;
++
++            nearest = along;
++            double closeness = 1.0 - along / reach;
++            float magnitude = (float) (10.0 + 14.0 * closeness);
++            boolean passOnLeft = Math.abs(lateral) < 0.3
++                ? vehicle.getId() % 2 == 0 : lateral > 0.0;
++            bias = passOnLeft ? -magnitude : magnitude;
++        }
++        return bias;
++    }
++
+     /**
+      * Three whisker probes. Returns a steering offset in degrees away from the
+      * blocked side, scaled down when the hull is already turning hard.
+@@ -748,19 +944,14 @@ public final class VehicleDriver {
+             direction.x * sin + direction.z * cos).normalize();
+     }
+ 
+-    private static boolean isFriendlyObstacle(SoldierEntity observer, Entity candidate) {
+-        if (candidate instanceof LivingEntity living) {
+-            return observer.isFriendlyTo(living);
++    private static boolean isFriendlyVehicle(SoldierEntity observer, Entity candidate) {
++        if (!com.stevesarmy.compat.sbw.SbwCompat.isVehicle(candidate)) return false;
++        if (com.stevesarmy.compat.SbwCompat.hasFriendlyOccupant(observer, candidate)) {
++            return true;
+         }
+-        if (com.stevesarmy.compat.sbw.SbwCompat.isVehicle(candidate)) {
+-            if (com.stevesarmy.compat.SbwCompat.hasFriendlyOccupant(observer, candidate)) {
+-                return true;
+-            }
+-            VehicleDriver driver = VehicleDriverRegistry.get(candidate);
+-            SoldierEntity otherDriver = driver != null ? driver.driverSoldier() : null;
+-            return otherDriver != null && observer.isFriendlyTo(otherDriver);
+-        }
+-        return false;
++        VehicleDriver driver = VehicleDriverRegistry.get(candidate);
++        SoldierEntity otherDriver = driver != null ? driver.driverSoldier() : null;
++        return otherDriver != null && observer.isFriendlyTo(otherDriver);
+     }
+ 
+     // -- stuck handling -------------------------------------------------------
+@@ -776,6 +967,13 @@ public final class VehicleDriver {
+         }
+         if (++stallTicks >= STUCK_TRIGGER_TICKS) {
+             stallTicks = 0;
++            if (closeRetreating && retreatReversing) {
++                // Blocked while backing away: flee forwards instead of backing further.
++                retreatReverseClear = false;
++                retreatPathCooldown = 40;
++                retreatReversing = false;
++                return;
++            }
+             reverseTicks = REVERSE_TICKS;
+             replanCooldown = 0;
+             pathAge = PATH_MAX_AGE_TICKS + 1;
+diff --git a/java/com/stevesarmy/vehicle/VehicleDriverRegistry.java b/java/com/stevesarmy/vehicle/VehicleDriverRegistry.java
+index af0c6cf..1bc3196 100644
+--- a/java/com/stevesarmy/vehicle/VehicleDriverRegistry.java
++++ b/java/com/stevesarmy/vehicle/VehicleDriverRegistry.java
+@@ -44,7 +44,10 @@ public final class VehicleDriverRegistry {
+     }
+ 
+     public static void remove(Entity vehicle) {
+-        if (vehicle != null) DRIVERS.remove(vehicle.getUUID());
++        if (vehicle != null) {
++            DRIVERS.remove(vehicle.getUUID());
++            VehicleWeaponController.forget(vehicle);
++        }
+     }
+ 
+     public static List<VehicleDriver> all() {
+@@ -84,5 +87,6 @@ public final class VehicleDriverRegistry {
+ 
+     public static void clearAll() {
+         DRIVERS.clear();
++        VehicleWeaponController.clearAll();
+     }
+ }
+\ No newline at end of file
+diff --git a/java/com/stevesarmy/vehicle/VehicleWeaponController.java b/java/com/stevesarmy/vehicle/VehicleWeaponController.java
+index 8babafe..e6980fd 100644
+--- a/java/com/stevesarmy/vehicle/VehicleWeaponController.java
++++ b/java/com/stevesarmy/vehicle/VehicleWeaponController.java
+@@ -1,184 +1,115 @@
+ package com.stevesarmy.vehicle;
+ 
+ import com.stevesarmy.compat.sbw.SbwCompat;
+-import com.stevesarmy.compat.sbw.SbwTurret;
+ import com.stevesarmy.compat.sbw.SbwVehicles;
+ import com.stevesarmy.entity.SoldierEntity;
+-import net.minecraft.server.level.ServerLevel;
+ import net.minecraft.util.Mth;
+ import net.minecraft.world.entity.Entity;
+ import net.minecraft.world.entity.LivingEntity;
+ import net.minecraft.world.phys.Vec3;
+ 
++import java.util.List;
++import java.util.Locale;
+ import java.util.Map;
+-import java.util.UUID;
+-import java.util.concurrent.ConcurrentHashMap;
++import java.util.WeakHashMap;
+ 
++/** Selects crew weapons and scans with an idle turret; SBW itself fires them. */
+ public final class VehicleWeaponController {
+-
+-    private static final Map<String, Long> NEXT_FIRE = new ConcurrentHashMap<>();
+-    private static final Map<UUID, IdleScan> IDLE = new ConcurrentHashMap<>();
+-    private static final int HEAT_CUTOFF = 90;
+-
+-    /** Idle traverse rate, degrees per tick. Deliberately slow. */
+-    private static final float IDLE_TRAVERSE = 0.45f;
+-    private static final float IDLE_ELEVATION_RATE = 0.12f;
+-    private static final float IDLE_ARC = 38.0f;
+-
+-    private VehicleWeaponController() {
+-    }
+-
+-    private static final class IdleScan {
+-        float yawOffset;
+-        float targetYawOffset;
+-        float pitch;
+-        float targetPitch;
+-        int dwell;
+-    }
+-
+-    public static void tick(VehicleDriver driver, Entity vehicle) {
+-        if (vehicle == null || vehicle.level().isClientSide) return;
+-
+-        Vec3 orderedTargetPos = driver.resolveAttackPosition(vehicle);
+-        UUID targetId = driver.attackTargetId();
+-
+-        boolean engaging = orderedTargetPos != null
+-            && (driver.mode() == VehicleDriveMode.ATTACK || driver.mode() == VehicleDriveMode.HOLD);
+-
+-        if (!engaging) {
+-            SbwVehicles.fire(vehicle, false);
+-            aimIdleTurret(vehicle);
+-            return;
+-        }
+-
+-        // A location order may outlive the target that originally attracted
+-        // the crew. Fire only while the spotter has a live hostile target, so
+-        // the cannon or MG never keeps shooting at the old aim point.
+-        SoldierEntity spotter = driver.driverSoldier();
+-        Entity tracked = targetId != null && vehicle.level() instanceof ServerLevel level
+-            ? level.getEntity(targetId)
+-            : spotter != null ? spotter.getTarget() : null;
+-        if (!(tracked instanceof LivingEntity target) || !target.isAlive()
+-            || spotter == null || spotter.isFriendlyTo(target)
+-            || !spotter.isProactiveTarget(target)) {
+-            SbwVehicles.fire(vehicle, false);
+-            aimIdleTurret(vehicle);
+-            return;
++    private static final int MIN_SWITCH_TICKS = 14;
++    private static final Map<Entity, TurretState> STATES = new WeakHashMap<>();
++
++    private VehicleWeaponController() {}
++
++    public static void tickMounted(SoldierEntity gunner, Entity vehicle, int seat, LivingEntity target) {
++        if (vehicle == null || vehicle.level().isClientSide || !SbwCompat.isVehicle(vehicle)
++            || SbwVehicles.passengerAt(vehicle, seat) != gunner
++            || seat != SbwVehicles.turretControllerIndex(vehicle)
++            || !SbwVehicles.seatHasWeapon(vehicle, seat)) return;
++
++        TurretState state = STATES.computeIfAbsent(vehicle, ignored -> new TurretState());
++        if (target == null) {
++            scanIdle(vehicle, seat, state);
++        } else {
++            chooseWeapon(vehicle, seat, target, state);
+         }
+-        targetId = target.getUUID();
+-        Entity targetVehicle = target.getVehicle();
+-        Vec3 targetPos = SbwCompat.isVehicle(targetVehicle)
+-            ? targetVehicle.getBoundingBox().getCenter()
+-            : target.getBoundingBox().getCenter();
+-
+-        // Engaging again, so the idle scan restarts from where the turret is.
+-        IDLE.remove(vehicle.getUUID());
+-
+-        // The driver seat owns the main turret's selectable weapons. Prefer
+-        // the cannon against hostile crew inside a vehicle and the coaxial MG
+-        // against exposed infantry; passenger stations keep their own loadout.
+-        selectMainWeapon(vehicle, target);
+-
+-        long now = vehicle.level().getGameTime();
+-        int seats = SbwVehicles.maxPassengers(vehicle);
+-
+-        for (int seatIndex = 0; seatIndex < seats; seatIndex++) {
+-            Entity occupant = SbwVehicles.passengerAt(vehicle, seatIndex);
+-            if (!(occupant instanceof SoldierEntity gunner)) continue;
+-            if (!SbwVehicles.seatHasWeapon(vehicle, seatIndex)) continue;
+-
+-            String weaponName = SbwVehicles.getGunName(vehicle, seatIndex);
+-            if (weaponName == null) continue;
+-
+-            if (SbwVehicles.ammoCount(vehicle, seatIndex) <= 0) continue;
+-            if (SbwVehicles.weaponHeat(vehicle, seatIndex) >= HEAT_CUTOFF) continue;
+-
+-            String key = vehicle.getUUID() + ":" + seatIndex + ":" + weaponName;
+-            long next = NEXT_FIRE.getOrDefault(key, 0L);
+-            if (now < next) continue;
+-
+-            Vec3 shootPos = SbwVehicles.shootPos(vehicle, seatIndex);
+-            Vec3 aimVec = targetPos.subtract(shootPos).normalize();
+-            SbwTurret.aim(vehicle, seatIndex, aimVec);
++    }
+ 
+-            boolean fired = SbwVehicles.shoot(vehicle, gunner, targetId, targetPos);
+-            if (fired) {
+-                NEXT_FIRE.put(key, now + cooldownFor(vehicle, seatIndex, weaponName));
++    private static void chooseWeapon(Entity vehicle, int seat, LivingEntity target, TurretState state) {
++        List<String> weapons = SbwVehicles.seatWeapons(vehicle, seat);
++        int primary = 0;
++        for (int i = 0; i < weapons.size(); i++) {
++            String name = weapons.get(i).toLowerCase(Locale.ROOT);
++            if (name.contains("cannon") || name.contains("main_gun") || name.equals("main")
++                || name.contains("laser")) {
++                primary = i;
++                break;
+             }
+         }
+-    }
+ 
+-    private static void selectMainWeapon(Entity vehicle, LivingEntity target) {
+-        int seat = SbwVehicles.turretControllerIndex(vehicle);
+-        if (seat < 0) return;
+-        boolean armoredTarget = SbwCompat.isVehicle(target.getVehicle());
+-        java.util.List<String> weapons = SbwVehicles.seatWeapons(vehicle, seat);
++        boolean armored = com.stevesarmy.compat.SbwCompat.isVehicle(target.getVehicle());
++        int backup = -1;
+         for (int i = 0; i < weapons.size(); i++) {
+-            String name = weapons.get(i).toLowerCase(java.util.Locale.ROOT);
+-            boolean match = armoredTarget
+-                ? name.contains("cannon") || name.contains("main_gun") || name.equals("main")
++            if (i == primary) continue;
++            String name = weapons.get(i).toLowerCase(Locale.ROOT);
++            boolean suitable = armored
++                ? name.contains("missile") || name.contains("rocket") || name.contains("cannon")
+                 : name.contains("machinegun") || name.contains("machine_gun")
+-                    || name.contains("coax") || name.equals("mg");
+-            if (match && SbwVehicles.weaponIndex(vehicle, seat) != i) {
+-                SbwVehicles.setWeaponIndex(vehicle, seat, i);
++                    || name.contains("coax") || name.startsWith("mg");
++            if (suitable && SbwVehicles.weaponReady(vehicle, seat, i)) {
++                backup = i;
++                break;
+             }
+-            if (match) return;
+         }
+-    }
+ 
+-    private static int cooldownFor(Entity vehicle, int seatIndex, String weaponName) {
+-        String normalized = weaponName.toLowerCase(java.util.Locale.ROOT);
+-        if (normalized.contains("machinegun") || normalized.contains("machine_gun")
+-            || normalized.contains("coax") || normalized.equals("mg")) {
+-            return 2;
++        long now = vehicle.level().getGameTime();
++        boolean reloading = SbwVehicles.weaponReloading(vehicle, seat, primary);
++        boolean ready = SbwVehicles.weaponReady(vehicle, seat, primary);
++        if (reloading && !state.wasReloading) {
++            state.useBackupThisReload = vehicle.level().random.nextFloat() < 0.65f;
+         }
+-        if (normalized.contains("missile") || normalized.contains("rocket")) return 40;
+-        SbwVehicles.Kind kind = SbwVehicles.kind(vehicle);
+-        if (seatIndex == 0 && kind == SbwVehicles.Kind.TRACKED) {
+-            return 80;
++        if (ready) state.unavailableSince = -1;
++        else if (state.unavailableSince < 0) state.unavailableSince = now;
++
++        int preferred = primary;
++        if (backup >= 0 && !ready && (reloading && state.useBackupThisReload
++            || !reloading && now - state.unavailableSince >= 12)) {
++            preferred = backup;
+         }
+-        return kind == SbwVehicles.Kind.HELICOPTER || kind == SbwVehicles.Kind.AIRCRAFT ? 10 : 15;
+-    }
++        state.wasReloading = reloading;
+ 
+-    /**
+-     * Idle turret behaviour. The old version pushed a raw sine straight into
+-     * the aim call every tick, which either snapped the turret or, when the
+-     * vector aim helper was not found, did nothing at all and left the gun
+-     * frozen. This keeps a per vehicle scan state, picks a new bearing inside
+-     * a narrow arc every few seconds and creeps toward it, the same way the
+-     * crew's heads drift while idle.
+-     */
+-    private static void aimIdleTurret(Entity vehicle) {
+-        int seat = SbwVehicles.turretControllerIndex(vehicle);
+-        if (seat < 0 || !SbwVehicles.seatHasWeapon(vehicle, seat)) return;
+-        // Nobody in the turret, nothing to scan with.
+-        if (!(SbwVehicles.passengerAt(vehicle, seat) instanceof SoldierEntity)) return;
++        if (SbwVehicles.weaponIndex(vehicle, seat) != preferred
++            && now - state.lastSwitchAt >= MIN_SWITCH_TICKS) {
++            SbwVehicles.setWeaponIndex(vehicle, seat, preferred);
++            state.lastSwitchAt = now;
++        }
++    }
+ 
+-        IdleScan scan = IDLE.computeIfAbsent(vehicle.getUUID(), id -> new IdleScan());
+-        if (--scan.dwell <= 0) {
+-            net.minecraft.util.RandomSource random = vehicle.level().getRandom();
+-            scan.targetYawOffset = (random.nextFloat() * 2.0f - 1.0f) * IDLE_ARC;
+-            scan.targetPitch = -1.0f + random.nextFloat() * 4.0f;
+-            scan.dwell = 70 + random.nextInt(130);
++    private static void scanIdle(Entity vehicle, int seat, TurretState state) {
++        long now = vehicle.level().getGameTime();
++        if (now >= state.nextScanAt) {
++            state.scanTarget = (vehicle.level().random.nextFloat() * 2.0f - 1.0f) * 28.0f;
++            state.nextScanAt = now + 65 + vehicle.level().random.nextInt(90);
+         }
+-        scan.yawOffset = approach(scan.yawOffset, scan.targetYawOffset, IDLE_TRAVERSE);
+-        scan.pitch = approach(scan.pitch, scan.targetPitch, IDLE_ELEVATION_RATE);
++        state.scanYaw = Mth.approach(state.scanYaw, state.scanTarget, 0.28f);
++        Vec3 direction = Vec3.directionFromRotation(-3.0f, vehicle.getYRot() + state.scanYaw);
++        SbwVehicles.aimWeapon(vehicle, seat, direction);
++    }
+ 
+-        float yaw = Mth.wrapDegrees(vehicle.getYRot() + scan.yawOffset);
+-        float pitch = -scan.pitch;
+-        SbwTurret.aimAngles(vehicle, seat, yaw, pitch);
++    public static void forget(Entity vehicle) {
++        if (vehicle != null) STATES.remove(vehicle);
+     }
+ 
+-    private static float approach(float current, float desired, float maxStep) {
+-        float delta = desired - current;
+-        if (Math.abs(delta) <= maxStep) return desired;
+-        return current + Math.signum(delta) * maxStep;
++    public static void clearAll() {
++        STATES.clear();
+     }
+ 
+-    public static void forget(Entity vehicle) {
+-        if (vehicle == null) return;
+-        String prefix = vehicle.getUUID().toString() + ":";
+-        NEXT_FIRE.keySet().removeIf(k -> k.startsWith(prefix));
+-        IDLE.remove(vehicle.getUUID());
++    private static final class TurretState {
++        private float scanYaw;
++        private float scanTarget;
++        private long nextScanAt;
++        private long lastSwitchAt = Long.MIN_VALUE / 2;
++        private long unavailableSince = -1;
++        private boolean wasReloading;
++        private boolean useBackupThisReload;
+     }
+ }

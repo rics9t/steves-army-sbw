@@ -114,6 +114,12 @@ public final class SbwVehicles {
         return !seatWeapons(vehicle, seatIndex).isEmpty();
     }
 
+    public static boolean seatAllowsHeadRotation(Entity vehicle, int seatIndex) {
+        Object seat = seatInfo(vehicle, seatIndex);
+        return seat != null && SbwReflection.asBool(
+            SbwReflection.get(seat, "canRotateHead", "getCanRotateHead", "isCanRotateHead"), true);
+    }
+
     public static String getGunName(Entity vehicle, int seatIndex) {
         if (isDrone(vehicle)) return null;
         Object res = SbwReflection.call(vehicle, new String[]{"getGunName"}, seatIndex);
@@ -130,6 +136,27 @@ public final class SbwVehicles {
     public static void setWeaponIndex(Entity vehicle, int seatIndex, int weaponIndex) {
         if (!SbwCompat.isVehicle(vehicle) || isDrone(vehicle) || weaponIndex < 0) return;
         SbwReflection.call(vehicle, new String[]{"setWeaponIndex"}, seatIndex, weaponIndex);
+    }
+
+    public static boolean weaponReloading(Entity vehicle, int seatIndex, int weaponIndex) {
+        Object gun = SbwReflection.call(vehicle, new String[]{"getGunData"}, seatIndex, weaponIndex);
+        return SbwReflection.asBool(SbwReflection.call(gun, new String[]{"reloading", "isReloading"}), false);
+    }
+
+    public static boolean weaponReady(Entity vehicle, int seatIndex, int weaponIndex) {
+        List<String> weapons = seatWeapons(vehicle, seatIndex);
+        if (weaponIndex < 0 || weaponIndex >= weapons.size()
+            || weaponReloading(vehicle, seatIndex, weaponIndex)) return false;
+
+        Object gun = SbwReflection.call(vehicle, new String[]{"getGunData"}, seatIndex, weaponIndex);
+        if (gun != null) {
+            // SBW's canShoot accounts for energy weapons, cooldown and ammo cost.
+            Object canShoot = SbwReflection.call(gun, new String[]{"canShoot"}, vehicle);
+            if (canShoot instanceof Boolean ready) return ready;
+        }
+        Object ammo = SbwReflection.call(vehicle, new String[]{"getAmmoCount"}, weapons.get(weaponIndex));
+        return SbwReflection.asInt(ammo, weaponIndex == weaponIndex(vehicle, seatIndex)
+            ? ammoCount(vehicle, seatIndex) : 0) > 0;
     }
 
     // -- health & fuel --------------------------------------------------------
@@ -256,16 +283,42 @@ public final class SbwVehicles {
 
     public static void aimWeapon(Entity vehicle, int seatIndex, Vec3 aimVec) {
         if (!SbwCompat.isVehicle(vehicle) || isDrone(vehicle) || aimVec == null) return;
-        Class<?> utilsClass = SbwReflection.cls("com.atsuishio.superbwarfare.entity.vehicle.utils.VehicleWeaponUtils");
-        if (utilsClass == null) return;
         int turretIdx = turretControllerIndex(vehicle);
         int weaponStationIdx = passengerWeaponStationControllerIndex(vehicle);
 
         if (seatIndex == turretIdx) {
-            SbwReflection.callStatic(utilsClass, new String[]{"turretAutoAimFromVector"}, vehicle, aimVec);
+            if (SbwReflection.invoke(vehicle, new String[]{"turretAutoAimFromVector"}, aimVec)) return;
         } else if (seatIndex == weaponStationIdx) {
-            SbwReflection.callStatic(utilsClass, new String[]{"passengerWeaponAutoAimFormVector"}, vehicle, aimVec);
+            if (SbwReflection.invoke(vehicle, new String[]{"passengerWeaponAutoAimFormVector"}, aimVec)) return;
+        } else {
+            return;
         }
+
+        Class<?> utilsClass = SbwReflection.cls("com.atsuishio.superbwarfare.entity.vehicle.utils.VehicleWeaponUtils");
+        if (utilsClass != null) {
+            SbwReflection.callStatic(utilsClass,
+                new String[]{seatIndex == turretIdx ? "turretAutoAimFromVector" : "passengerWeaponAutoAimFormVector"},
+                vehicle, aimVec);
+        }
+    }
+
+    /** SBW normally mirrors Mob.setTarget through an event, but a target may predate boarding. */
+    public static void syncAutoTarget(Entity vehicle, int seatIndex, LivingEntity target) {
+        if (!SbwCompat.isVehicle(vehicle) || isDrone(vehicle)) return;
+        String id = target == null ? "undefined" : target.getStringUUID();
+        if (seatIndex == turretControllerIndex(vehicle)) {
+            SbwReflection.set(vehicle, id, "aiTurretTargetUUID");
+        } else if (seatIndex == passengerWeaponStationControllerIndex(vehicle)) {
+            SbwReflection.set(vehicle, id, "aiPassengerWeaponTargetUUID");
+        }
+    }
+
+    public static float turretMinPitch(Entity vehicle) {
+        return SbwReflection.asFloat(SbwReflection.get(vehicle, "turretMinPitch", "getTurretMinPitch"), -10.0f);
+    }
+
+    public static float turretMaxPitch(Entity vehicle) {
+        return SbwReflection.asFloat(SbwReflection.get(vehicle, "turretMaxPitch", "getTurretMaxPitch"), 20.0f);
     }
 
     public static boolean shoot(Entity vehicle, LivingEntity gunner, UUID targetId, Vec3 targetPos) {
@@ -305,7 +358,7 @@ public final class SbwVehicles {
             return Kind.AIRCRAFT;
         }
         if (n.contains("tank") || n.contains("m1a2") || n.contains("t90")
-            || n.contains("ztz") || n.contains("bmp") || n.contains("yx100")
+            || n.contains("ztz") || n.contains("bmp") || n.contains("bradley") || n.contains("yx100")
             || n.contains("prism") || n.contains("type63")) {
             return Kind.TRACKED;
         }
