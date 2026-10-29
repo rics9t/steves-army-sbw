@@ -2317,6 +2317,12 @@ public class SoldierCombatGoal extends Goal implements CombatGoalController {
         }
         yawSigma += (float) aimPoint.concealment * 2.00f;
         pitchSigma += (float) aimPoint.concealment * 0.75f;
+        if (aimPoint.type == ExposureCalculator.AimPointType.HEAD
+            && target != null && com.stevesarmy.compat.sbw.SbwVehicles.isExposedRider(target)) {
+            // A small exposed head needs a deliberate shot, not a torso-sized burst.
+            yawSigma = Math.min(yawSigma, 0.8f);
+            pitchSigma = Math.min(pitchSigma, 0.8f);
+        }
         return new float[]{yawSigma, pitchSigma};
     }
 

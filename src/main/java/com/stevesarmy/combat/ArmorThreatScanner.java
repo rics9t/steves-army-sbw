@@ -560,25 +560,26 @@ public final class ArmorThreatScanner {
      */
     @Nullable
     public static Vec3 findFiringSolution(SoldierEntity soldier, ArmorContact armor) {
-        if (TargetAcquisition.hasNearLineOfSightToPosition(soldier, armor.aimPoint(), LOS_TOLERANCE)) {
-            rememberFiringSolution(soldier, armor.aimPoint());
-            return armor.aimPoint();
-        }
-        // Plain-entity vehicle (Superb Warfare): hull samples are points inside
-        // the entity's own hitbox, so sight is plain block/smoke — the ship clip
-        // below never sees the vehicle and there is no surface to pull back from.
+        // SBW hulls now block visibility, so aim at their near surface rather
+        // than requiring a clear ray to a point inside the target's own armor.
         if (soldier.level() instanceof ServerLevel serverLevel) {
             Entity vehicle = serverLevel.getEntity(armor.threatId());
             if (SbwCompat.isOperational(vehicle)) {
                 for (Vec3 candidate : hullSamples(armor)) {
-                    if (TargetAcquisition.hasLineOfSightToPosition(soldier, candidate)) {
-                        rememberFiringSolution(soldier, candidate);
-                        return candidate;
+                    Vec3 surface = com.stevesarmy.compat.sbw.SbwVehicleOcclusion.visibleSurface(
+                        soldier.level(), soldier.getEyePosition(), candidate, vehicle, soldier);
+                    if (surface != null) {
+                        rememberFiringSolution(soldier, surface);
+                        return surface;
                     }
                 }
                 forgetFiringSolution(soldier);
                 return null;
             }
+        }
+        if (TargetAcquisition.hasNearLineOfSightToPosition(soldier, armor.aimPoint(), LOS_TOLERANCE)) {
+            rememberFiringSolution(soldier, armor.aimPoint());
+            return armor.aimPoint();
         }
         Vec3 eye = soldier.getEyePosition();
         AABB region = hullRegion(armor);

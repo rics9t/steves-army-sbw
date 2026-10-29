@@ -96,12 +96,15 @@ public class TargetAcquisition {
         // Entity-pair LOS has always had a one-tick cache. Higher profiles only
         // extend it when the exact endpoint positions remain unchanged.
         int cacheTicks = Math.max(1, StevesArmyConfig.getPositionVisibilityCacheTicks());
+        if (com.stevesarmy.compat.sbw.SbwCompat.hasVehicles()) cacheTicks = 1;
 
         long key = ((long) observer.getId() << 32) | (target.getId() & 0xFFFFFFFFL);
         TickVisibilityCache cache = getVisibilityCache(observer.level());
         long currentTick = observer.level().getGameTime();
         Vec3 from = DetectionViewpoint.getEyePosition(observer);
-        Vec3 to = target.getEyePosition();
+        Vec3 to = com.stevesarmy.compat.sbw.SbwVehicles.isExposedRider(target)
+            ? target.position().add(0.0, target.getBbHeight() * 0.92, 0.0)
+            : target.getEyePosition();
         CachedVisibility cached = cache.results.get(key);
         if (cached != null && cached.expiresAt >= currentTick
             && cached.from.equals(from) && cached.to.equals(to)) {
@@ -163,6 +166,7 @@ public class TargetAcquisition {
                                                                boolean ignoreSmoke) {
         Vec3 from = DetectionViewpoint.getEyePosition(observer);
         int cacheTicks = StevesArmyConfig.getPositionVisibilityCacheTicks();
+        if (com.stevesarmy.compat.sbw.SbwCompat.hasVehicles()) cacheTicks = Math.min(cacheTicks, 1);
         if (cacheTicks <= 0) {
             PerformanceMetrics.recordVisibilityCacheMiss();
             return tracePosition(observer, from, targetPos, ignoreSmoke);

@@ -61,7 +61,9 @@ public final class MountedSoldierGunnery {
             return;
         }
 
-        Vec3 aimPoint = target.getEyePosition();
+        Vec3 head = SbwVehicles.isExposedRider(target)
+            ? ExposureCalculator.getVisibleHeadPoint(soldier, target) : null;
+        Vec3 aimPoint = head != null ? head : target.getEyePosition();
         // VehicleCrewPose owns the head rotation and moves it with the mounted
         // saccade/pursuit model. Do not steer the head here as well: that made
         // the shot gate inspect a temporary yaw which the pose writer replaced
@@ -84,7 +86,18 @@ public final class MountedSoldierGunnery {
         }
         if (!FriendlyFireChecker.isSafeToShoot(soldier, aimPoint, 0.65f)) return;
 
-        switch (GunIntegration.shoot(soldier, target)) {
+        GunIntegration.ShootResult result;
+        if (head != null) {
+            if (!VisibilityRay.traceFresh(soldier.level(), soldier.getEyePosition(), head, soldier).hasContact()) return;
+            var aimed = new ExposureCalculator.AimPointResult(head,
+                ExposureCalculator.AimPointType.HEAD, true, true, 0.0);
+            float pitchDeviation = (float) (soldier.getRandom().nextGaussian() * 0.35);
+            float yawDeviation = (float) (soldier.getRandom().nextGaussian() * 0.35);
+            result = GunIntegration.shootWithDeviation(soldier, aimed, pitchDeviation, yawDeviation);
+        } else {
+            result = GunIntegration.shoot(soldier, target);
+        }
+        switch (result) {
             case NO_AMMO -> {
                 if (GunIntegration.canReload(soldier)) GunIntegration.reload(soldier);
             }

@@ -163,6 +163,12 @@ public final class SbwVehicles {
             SbwReflection.call(vehicle, new String[]{"hidePassenger"}, passenger), false);
     }
 
+    /** An exposed rider can be engaged at its head, unlike a hidden enclosed crewman. */
+    public static boolean isExposedRider(LivingEntity target) {
+        Entity vehicle = target == null ? null : target.getVehicle();
+        return SbwCompat.isVehicle(vehicle) && !isDrone(vehicle) && !hidesPassenger(vehicle, target);
+    }
+
     /**
      * A buttoned-up tank with hidden crew in seats 0/1 and no exposed gunner
      * in seat 2 is a cover threat for infantry. They cannot hit the riders with
@@ -238,6 +244,66 @@ public final class SbwVehicles {
         Object ammo = SbwReflection.call(vehicle, new String[]{"getAmmoCount"}, weapons.get(weaponIndex));
         int fallback = weaponIndex == weaponIndex(vehicle, seatIndex) ? ammoCount(vehicle, seatIndex) : 0;
         return SbwReflection.asInt(ammo, fallback) > 0;
+    }
+
+    /** Usable without considering a short firing cooldown. Includes energy/infinite ammo. */
+    public static boolean weaponAvailable(Entity vehicle, int seatIndex, int weaponIndex) {
+        List<String> weapons = seatWeapons(vehicle, seatIndex);
+        if (weaponIndex < 0 || weaponIndex >= weapons.size()
+            || weaponReloading(vehicle, seatIndex, weaponIndex)) return false;
+        Object gun = SbwReflection.call(vehicle, new String[]{"getGunData"}, seatIndex, weaponIndex);
+        if (gun != null) {
+            Object supplier = SbwReflection.get(vehicle, "ammoSupplier", "getAmmoSupplier");
+            if (supplier == null) supplier = vehicle;
+            Object enough = SbwReflection.call(gun, new String[]{"hasEnoughAmmoToShoot"}, supplier);
+            if (enough instanceof Boolean value) return value;
+            Object ready = SbwReflection.call(gun, new String[]{"canShoot"}, supplier);
+            if (Boolean.TRUE.equals(ready)) return true;
+        }
+        return weaponHasAmmo(vehicle, seatIndex, weaponIndex);
+    }
+
+    /** Read a processed gun property, including the currently selected ammo override. */
+    private static Object gunProperty(Object gun, String property) {
+        Class<?> props = SbwReflection.cls("com.atsuishio.superbwarfare.data.gun.GunProp");
+        java.lang.reflect.Field field = SbwReflection.field(props, property);
+        if (gun == null || field == null) return null;
+        try {
+            return SbwReflection.call(gun, new String[]{"get"}, field.get(null));
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            return null;
+        }
+    }
+
+    private static boolean enabledSbwExplosionSetting(String name) {
+        Class<?> config = SbwReflection.cls("com.atsuishio.superbwarfare.config.server.ExplosionConfig");
+        java.lang.reflect.Field field = SbwReflection.field(config, name);
+        if (field == null) return false;
+        try {
+            return Boolean.TRUE.equals(SbwReflection.call(field.get(null), new String[]{"get"}));
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            return false;
+        }
+    }
+
+    /** Fail closed: only SBW's actual AP cannon shell, with block penetration enabled. */
+    public static boolean weaponCanPenetrateCover(Entity vehicle, int seat, int weapon) {
+        Object gun = SbwReflection.call(vehicle, new String[]{"getGunData"}, seat, weapon);
+        if (!"AP".equals(gunProperty(gun, "SHELL_TYPE"))
+            || !Boolean.TRUE.equals(gunProperty(gun, "EXPLOSION_DESTROY"))
+            || !enabledSbwExplosionSetting("EXPLOSION_DESTROY")
+            || !enabledSbwExplosionSetting("EXTRA_EXPLOSION_EFFECT")) return false;
+        Object projectile = gunProperty(gun, "PROJECTILE");
+        Object id = SbwReflection.get(projectile, "getId", "getItemId", "itemId");
+        return "superbwarfare:cannon_shell".equals(String.valueOf(id));
+    }
+
+    /** Fire through the same weapon-specific path used by SBW; caller owns rate/aim checks. */
+    public static boolean shootAtPosition(Entity vehicle, LivingEntity gunner, int seat, Vec3 pos) {
+        String name = getGunName(vehicle, seat);
+        if (name == null || !Boolean.TRUE.equals(
+            SbwReflection.call(vehicle, new String[]{"canShoot"}, gunner))) return false;
+        return SbwReflection.invoke(vehicle, new String[]{"vehicleShoot"}, gunner, name, null, pos);
     }
 
     /** Whether the currently selected weapon in a seat has ammunition available. */
