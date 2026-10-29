@@ -520,35 +520,61 @@ public final class SbwVehicles {
 
     // -- classification, for movement tuning ----------------------------------
 
-    public enum Kind { GROUND, TRACKED, BOAT, HELICOPTER, AIRCRAFT, STATIC, UNKNOWN }
+    public enum Kind { GROUND, TRACKED, WHEELCHAIR, BOAT, HELICOPTER, AIRCRAFT, AIRSHIP, STATIC, UNKNOWN }
+
+    /** SBW's data is authoritative: many unrelated vehicles share one generic Java class. */
+    public static String engineType(Entity vehicle) {
+        Object data = SbwReflection.call(vehicle, new String[]{"computed"});
+        Object engine = SbwReflection.get(data, "getEngineType", "engineType");
+        return engine instanceof Enum<?> e ? e.name() : null;
+    }
 
     public static Kind kind(Entity vehicle) {
         if (!SbwCompat.isVehicle(vehicle) || isDrone(vehicle)) return Kind.UNKNOWN;
+        String engine = engineType(vehicle);
+        if (engine != null) {
+            switch (engine) {
+                case "TRACK": return Kind.TRACKED;
+                case "WHEEL": return Kind.GROUND;
+                case "WHEELCHAIR": return Kind.WHEELCHAIR;
+                case "SHIP": return Kind.BOAT;
+                case "HELICOPTER": return Kind.HELICOPTER;
+                case "AIRCRAFT": case "TOM6": return Kind.AIRCRAFT;
+                case "AIRSHIP": return Kind.AIRSHIP;
+                case "FIXED": case "EMPTY": return Kind.STATIC;
+                default: break;
+            }
+        }
+        String type = com.stevesarmy.compat.SbwCompat.getVehicleTypeName(vehicle);
+        if (type != null) {
+            switch (type) {
+                case "AIRPLANE": return Kind.AIRCRAFT;
+                case "HELICOPTER": return Kind.HELICOPTER;
+                case "AIRSHIP": return Kind.AIRSHIP;
+                case "BOAT": return Kind.BOAT;
+                case "ARTILLERY": case "DEFENSE": return Kind.STATIC;
+                default: break;
+            }
+        }
+        // Compatibility fallback for older SBW builds without computed engine data.
         String n = vehicle.getClass().getName().toLowerCase(java.util.Locale.ROOT);
+        if (n.contains("wheelchair") || n.contains("wheel_chair")) return Kind.WHEELCHAIR;
         if (n.contains("artillery") || n.contains("mortar") || n.contains("tower")
-            || n.contains("annihilator") || n.contains("laser")) {
-            return Kind.STATIC;
-        }
+            || n.contains("annihilator") || n.contains("laser")) return Kind.STATIC;
         if (n.contains("boat") || n.contains("ship")) return Kind.BOAT;
-        if (n.contains("heli") || n.contains("ah6") || n.contains("mi28")
-            || n.contains("ghast")) {
-            return Kind.HELICOPTER;
-        }
+        if (n.contains("heli") || n.contains("ah6") || n.contains("mi28")) return Kind.HELICOPTER;
         if (n.contains("a10") || n.contains("ju87") || n.contains("j16")
-            || n.contains("ac130") || n.contains("kirov") || n.contains("plane")) {
-            return Kind.AIRCRAFT;
-        }
+            || n.contains("ac130") || n.contains("plane")) return Kind.AIRCRAFT;
+        if (n.contains("kirov") || n.contains("ghast")) return Kind.AIRSHIP;
         if (n.contains("tank") || n.contains("m1a2") || n.contains("t90")
             || n.contains("ztz") || n.contains("bmp") || n.contains("bradley") || n.contains("yx100")
-            || n.contains("prism") || n.contains("type63")) {
-            return Kind.TRACKED;
-        }
+            || n.contains("prism")) return Kind.TRACKED;
         return Kind.GROUND;
     }
 
     public static boolean isAirborne(Entity vehicle) {
         Kind k = kind(vehicle);
-        return k == Kind.HELICOPTER || k == Kind.AIRCRAFT;
+        return k == Kind.HELICOPTER || k == Kind.AIRCRAFT || k == Kind.AIRSHIP;
     }
 
     public static boolean canDrive(Entity vehicle) {

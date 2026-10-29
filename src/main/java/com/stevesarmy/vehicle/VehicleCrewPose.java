@@ -98,6 +98,17 @@ public final class VehicleCrewPose {
 
     private static void apply(SoldierEntity soldier, Entity vehicle) {
         float hullYaw = vehicle.getYRot();
+        // Wheelchair physics derives its heading from the driver's head yaw.
+        // Do not let the normal idle glance pull the chair into a spin.
+        if (SbwVehicles.kind(vehicle) == SbwVehicles.Kind.WHEELCHAIR
+            && SbwVehicles.isDriver(vehicle, soldier)) {
+            VehicleDriver driver = VehicleDriverRegistry.get(vehicle);
+            if (driver != null && driver.driverSoldier() == soldier) {
+                Float heading = driver.wheelchairHeading();
+                writePose(soldier, vehicle, heading == null ? hullYaw : heading, 0.0f);
+                return;
+            }
+        }
         Pose pose = POSES.computeIfAbsent(soldier.getUUID(), id -> new Pose());
         float arc = HEAD_ARC;
         int seat = SbwVehicles.seatIndexOf(vehicle, soldier);

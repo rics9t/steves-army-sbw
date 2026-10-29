@@ -78,7 +78,10 @@ public final class ClientVehicleTurretSync {
             SbwReflection.set(vehicle, pitch, pitchName);
             // This native SBW method only plays on the client, and applies its
             // normal threshold, volume, sound event and random pitch.
-            SbwReflection.invoke(vehicle, new String[]{"turretTurnSound"}, dx, dy, 0.95f);
+            String type = com.stevesarmy.compat.SbwCompat.getVehicleTypeName(vehicle);
+            if (turret && ("TANK".equals(type) || "APC".equals(type) || "AA".equals(type))) {
+                SbwReflection.invoke(vehicle, new String[]{"turretTurnSound"}, dx, dy, 0.95f);
+            }
             sample.dirty = false;
         }
     }

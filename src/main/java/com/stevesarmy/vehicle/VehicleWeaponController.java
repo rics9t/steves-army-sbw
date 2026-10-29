@@ -203,8 +203,20 @@ public final class VehicleWeaponController {
         boolean newTarget = !targetId.equals(state.attackTargetId);
         if (newTarget || now >= state.nextAttackAimAt) {
             state.attackTargetId = targetId;
-            state.desiredAttackYawOffset = Mth.clamp((float) (random.nextGaussian() * 0.28), -0.5f, 0.5f);
-            state.desiredAttackPitchOffset = Mth.clamp((float) (random.nextGaussian() * 0.18), -0.35f, 0.35f);
+            // Keep the errors small and slowly varying, but infantry is a much
+            // smaller target than a hull. Previously a new engagement began at
+            // exactly zero error and took many ticks to reach even 0.3 degrees.
+            boolean armor = SbwCompat.isVehicle(target);
+            float yawSigma = armor ? 0.38f : 0.45f;
+            float pitchSigma = armor ? 0.25f : 0.28f;
+            state.desiredAttackYawOffset = Mth.clamp((float) (random.nextGaussian() * yawSigma),
+                armor ? -0.8f : -0.9f, armor ? 0.8f : 0.9f);
+            state.desiredAttackPitchOffset = Mth.clamp((float) (random.nextGaussian() * pitchSigma),
+                armor ? -0.55f : -0.6f, armor ? 0.55f : 0.6f);
+            if (newTarget) {
+                state.attackYawOffset = state.desiredAttackYawOffset;
+                state.attackPitchOffset = state.desiredAttackPitchOffset;
+            }
             state.nextAttackAimAt = now + 50 + random.nextInt(41);
         }
 

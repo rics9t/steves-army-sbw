@@ -68,6 +68,8 @@ public final class VehicleDriver {
 
     private static final int STUCK_TRIGGER_TICKS = 40;
     private static final int REVERSE_TICKS = 18;
+    // Driver maneuver memory only; this never authorizes firing through cover.
+    private static final long DRIVER_CONTACT_TICKS = 200;
 
     private final WeakReference<Entity> vehicleRef;
     private WeakReference<SoldierEntity> driverRef = new WeakReference<>(null);
@@ -97,6 +99,10 @@ public final class VehicleDriver {
 
     /** True once this driver has written inputs the hull may still be holding. */
     private boolean controlsDirty;
+    private Float wheelchairHeading;
+    private Vec3 lastThreatPosition;
+    private UUID lastThreatId;
+    private long lastThreatSeenAt = Long.MIN_VALUE;
 
     /** Backing away from a target the main gun cannot reach. */
     private boolean closeRetreating;
@@ -133,6 +139,9 @@ public final class VehicleDriver {
     public VehicleDriveMode mode() {
         return mode;
     }
+
+    /** Heading consumed by the wheelchair's native rider-head steering. */
+    public Float wheelchairHeading() { return wheelchairHeading; }
 
     public void orderFollow(Entity target) {
         this.mode = VehicleDriveMode.FOLLOW;
@@ -288,7 +297,8 @@ public final class VehicleDriver {
         }
 
         throttleCommanded = false;
-        if (mode != VehicleDriveMode.DISMOUNT && mode != VehicleDriveMode.GO_TO
+        wheelchairHeading = null;
+        if (!SbwVehicles.isAirborne(vehicle) && mode != VehicleDriveMode.DISMOUNT && mode != VehicleDriveMode.GO_TO
             && retreatFromUnreachableTarget(vehicle)) {
             trackStall(vehicle);
             return true;
@@ -351,9 +361,9 @@ public final class VehicleDriver {
     // -- modes ----------------------------------------------------------------
 
     private void tickFollow(Entity vehicle) {
-        LivingEntity threat = activeCombatThreat(vehicle);
+        Vec3 threat = rememberedCombatThreat(vehicle);
         if (threat != null) {
-            tickCombatManeuver(vehicle, combatTargetPosition(threat), null, 0.0);
+            tickCombatManeuver(vehicle, threat, null, 0.0);
             return;
         }
         fightSpot = null;
@@ -429,9 +439,9 @@ public final class VehicleDriver {
     }
 
     private void tickAttack(Entity vehicle) {
-        LivingEntity threat = activeCombatThreat(vehicle);
+        Vec3 threat = rememberedCombatThreat(vehicle);
         Vec3 targetPos = resolveAttackPosition(vehicle);
-        if (threat != null) targetPos = combatTargetPosition(threat);
+        if (threat != null) targetPos = threat;
         if (targetPos == null) {
             mode = VehicleDriveMode.HOLD;
             clearAttack();
@@ -446,23 +456,23 @@ public final class VehicleDriver {
 
     private void tickHold(Entity vehicle) {
         if (holdAnchor == null) holdAnchor = vehicle.blockPosition();
-        LivingEntity threat = activeCombatThreat(vehicle);
+        Vec3 threat = rememberedCombatThreat(vehicle);
         if (threat == null) {
             fightSpot = null;
             brake(vehicle);
             return;
         }
-        tickCombatManeuver(vehicle, combatTargetPosition(threat), holdAnchor, 8.0);
+        tickCombatManeuver(vehicle, threat, holdAnchor, 8.0);
     }
 
     private void tickIdle(Entity vehicle) {
-        LivingEntity threat = activeCombatThreat(vehicle);
+        Vec3 threat = rememberedCombatThreat(vehicle);
         if (threat == null) {
             fightSpot = null;
             releaseControls();
             return;
         }
-        tickCombatManeuver(vehicle, combatTargetPosition(threat), null, 0.0);
+        tickCombatManeuver(vehicle, threat, null, 0.0);
     }
 
     private static LivingEntity activeCombatThreat(Entity vehicle) {
@@ -475,6 +485,35 @@ public final class VehicleDriver {
             || !gunner.isProactiveTarget(target)
             || !gunner.getSensing().hasLineOfSight(target)) return null;
         return target;
+    }
+
+    private Vec3 rememberedCombatThreat(Entity vehicle) {
+        long now = vehicle.level().getGameTime();
+        LivingEntity visible = activeCombatThreat(vehicle);
+        if (visible != null) {
+            lastThreatId = visible.getUUID();
+            lastThreatPosition = combatTargetPosition(visible);
+            lastThreatSeenAt = now;
+            return lastThreatPosition;
+        }
+        if (lastThreatPosition == null || now < lastThreatSeenAt
+            || now - lastThreatSeenAt > DRIVER_CONTACT_TICKS) {
+            lastThreatPosition = null;
+            lastThreatId = null;
+            return null;
+        }
+        // Check liveness/allegiance without reading an unseen target's position.
+        if (lastThreatId != null && vehicle.level() instanceof ServerLevel server) {
+            Entity known = server.getEntity(lastThreatId);
+            SoldierEntity driver = driverSoldier();
+            if (known != null && (!known.isAlive() || known instanceof LivingEntity living
+                && driver != null && (driver.isFriendlyTo(living) || !driver.isProactiveTarget(living)))) {
+                lastThreatPosition = null;
+                lastThreatId = null;
+                return null;
+            }
+        }
+        return lastThreatPosition;
     }
 
     private static Vec3 combatTargetPosition(LivingEntity target) {
@@ -617,15 +656,9 @@ public final class VehicleDriver {
     }
 
     public Vec3 resolveAttackPosition(Entity vehicle) {
-        if (attackTargetId != null && vehicle.level() instanceof ServerLevel level) {
-            Entity target = level.getEntity(attackTargetId);
-            if (target != null && target.isAlive()) {
-                attackTargetPos = target.position();
-                return attackTargetPos;
-            }
-            clearAttack();
-            return null;
-        }
+        // The order supplies an objective area. Never follow a hidden entity by
+        // reading its current position; the visible/remembered contact above
+        // provides tactical movement when the crew actually knows the target.
         return attackTargetPos;
     }
 
@@ -826,10 +859,21 @@ public final class VehicleDriver {
         error += infantryBias(vehicle, direction, (float) Math.abs(error));
         error = Mth.wrapDegrees(error);
 
+        SbwVehicles.Kind kind = SbwVehicles.kind(vehicle);
         boolean turnLeft = error < -STEER_DEADZONE_DEGREES;
         boolean turnRight = error > STEER_DEADZONE_DEGREES;
         boolean sharpTurn = Math.abs(error) > HARD_TURN_DEGREES;
-        boolean forward = accelerate && !sharpTurn;
+        if (kind == SbwVehicles.Kind.WHEELCHAIR) {
+            // SBW wheelchairs ignore left/right keys and steer toward seat 0's
+            // head yaw. Pose writer consumes this so it cannot overwrite us.
+            wheelchairHeading = Mth.wrapDegrees(currentYaw + error);
+            SoldierEntity driver = driverSoldier();
+            if (driver != null) driver.setYHeadRot(wheelchairHeading);
+        }
+        // Road vehicles and boats need forward motion in order to steer; only
+        // tracked hulls and wheelchairs can pivot in place.
+        boolean canPivot = kind == SbwVehicles.Kind.TRACKED || kind == SbwVehicles.Kind.WHEELCHAIR;
+        boolean forward = accelerate && (!sharpTurn || !canPivot);
         boolean sprint = allowSprint && forward && Math.abs(error) < 9.0f && distance > 8.0;
 
         SbwVehicles.updateInputs(vehicle, forward, false, turnLeft, turnRight, sprint);
@@ -837,7 +881,8 @@ public final class VehicleDriver {
         throttleCommanded = forward || sprint;
         brakedLastTick = false;
 
-        applyYawAssist(vehicle, currentYaw, error);
+        if (kind == SbwVehicles.Kind.TRACKED) applyYawAssist(vehicle, currentYaw, error);
+        else previousYaw = currentYaw;
         return true;
     }
 
