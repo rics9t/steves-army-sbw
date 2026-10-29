@@ -20,10 +20,10 @@ import java.util.UUID;
 /**
  * Spotter AI for dedicated vehicle crew mounted on Superb Warfare vehicles. While a soldier is
  * a passenger, {@code VS2Compat.prepareSoldierAi} freezes its goal system — but
- * SBW's native mob-crew gunnery fires the vehicle's turret and seat weapons at
- * the riding Mob's target. Keep spotting and weapon selection alive while the
- * soldier's normal movement/cover AI is frozen. SBW handles the actual shots,
- * ballistic lead and RPM; this mod must not double-fire those weapons.
+ * SBW's native mob-crew gunnery fires at the riding Mob's target. Keep spotting
+ * and weapon selection alive while the soldier's normal movement/cover AI is
+ * frozen. SBW owns the actual shots and fire cadence; this mod steers the weapon
+ * with SBW's ballistic solver and never double-fires.
  * Ordinary infantry use {@link MountedSoldierGunnery} only in seats that permit
  * handheld weapons.
  *
@@ -96,11 +96,9 @@ public final class SbwVehicleGunnery {
         }
 
         if (seat >= 0) {
-            // SBW's vehicle tick resolves this UUID and computes the firing
-            // solution from its actual barrel transform. Clearing it here
-            // disabled that path and made our old per-soldier vector steering
-            // fight the vehicle tick, which could leave the turret stationary.
-            SbwVehicles.syncAutoTarget(mount, seat, current);
+            // Only vehicle-crew roles reach this controller. It clears SBW's
+            // exact UUID aim and feeds the weapon station a slightly imperfect
+            // ballistic vector; SBW still fires from the Mob target and RPM.
             VehicleWeaponController.tickMounted(soldier, mount, seat, current);
         }
     }
@@ -114,10 +112,7 @@ public final class SbwVehicleGunnery {
         int seat = SbwVehicles.seatIndexOf(vehicle, soldier);
         Vec3 origin = seat >= 0 && SbwVehicles.seatHasWeapon(vehicle, seat)
             ? SbwVehicles.shootPos(vehicle, seat) : soldier.getEyePosition();
-        Entity targetVehicle = target.getVehicle();
-        Vec3 aimPoint = SbwCompat.isVehicle(targetVehicle)
-            ? targetVehicle.getBoundingBox().getCenter() : target.getEyePosition();
-        return VisibilityRay.trace(soldier.level(), origin, aimPoint, soldier).hasContact();
+        return VisibilityRay.trace(soldier.level(), origin, target.getEyePosition(), soldier).hasContact();
     }
 
     private static void pruneIfNeeded(long gameTime) {

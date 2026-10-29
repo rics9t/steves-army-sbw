@@ -105,6 +105,24 @@ public final class SbwVehicles {
         return !SbwReflection.asBool(ban, false) && !seatHasWeapon(vehicle, seatIndex);
     }
 
+    /** Whether an unarmed passenger seat is exposed and can be used by a rifleman. */
+    public static boolean seatHidesPassenger(Entity vehicle, int seatIndex) {
+        Object seat = seatInfo(vehicle, seatIndex);
+        return seat != null && SbwReflection.asBool(
+            SbwReflection.get(seat, "hidePassenger", "getHidePassenger", "isHidePassenger"), false);
+    }
+
+    /** First free visible passenger seat where an ordinary rider may use a handheld weapon. */
+    public static int firstFreeVisibleHandheldPassengerSeat(Entity vehicle) {
+        for (int seat = 1; seat < maxPassengers(vehicle); seat++) {
+            if (passengerAt(vehicle, seat) == null && seatAllowsHandheld(vehicle, seat)
+                && !seatHidesPassenger(vehicle, seat)) {
+                return seat;
+            }
+        }
+        return -1;
+    }
+
     /**
      * Whether a seated soldier may use its own rifle after that seat's mounted
      * weapon runs out. SBW's normal hand-use check also rejects every seat with
@@ -356,6 +374,26 @@ public final class SbwVehicles {
         if (isDrone(vehicle)) return 30.0f;
         return SbwReflection.asFloat(
             SbwReflection.call(vehicle, new String[]{"getProjectileVelocity"}, seatIndex), 30.0f);
+    }
+
+    public static float projectileGravity(Entity vehicle, int seatIndex) {
+        if (isDrone(vehicle)) return 0.0f;
+        return SbwReflection.asFloat(
+            SbwReflection.call(vehicle, new String[]{"getProjectileGravity"}, seatIndex), 0.0f);
+    }
+
+    /** Preserve SBW's ballistic lead while the Steve's Army crew controller adds subtle aim error. */
+    public static Vec3 firingSolution(Entity vehicle, int seatIndex, Vec3 targetPos, Vec3 targetVelocity) {
+        Vec3 origin = shootPos(vehicle, seatIndex);
+        if (targetPos == null) return Vec3.ZERO;
+        Class<?> rangeTool = SbwReflection.cls("com.atsuishio.superbwarfare.tools.RangeTool");
+        Object solution = SbwReflection.callStatic(rangeTool,
+            new String[]{"calculateFiringSolution"}, origin, targetPos,
+            targetVelocity == null ? Vec3.ZERO : targetVelocity,
+            (double) projectileVelocity(vehicle, seatIndex),
+            (double) projectileGravity(vehicle, seatIndex));
+        return solution instanceof Vec3 vector && vector.lengthSqr() > 1.0e-6
+            ? vector : targetPos.subtract(origin);
     }
 
     public static void aimWeapon(Entity vehicle, int seatIndex, Vec3 aimVec) {

@@ -29,6 +29,7 @@ public final class MountedSoldierGunnery {
             && SbwVehicles.seatAllowsRifleWhenWeaponEmpty(vehicle, seat)
             && !SbwVehicles.hidesPassenger(vehicle, soldier);
         if (seat < 0 || SbwVehicles.isDriver(vehicle, soldier)
+            || SbwVehicles.hidesPassenger(vehicle, soldier)
             || (!SbwVehicles.seatAllowsHandheld(vehicle, seat) && !emptyWeaponFallback)
             || !GunIntegration.isAnyGunLoaded() || !GunIntegration.hasGun(soldier)
             || ArmorRoleManager.isAtGunStack(soldier.getMainHandItem())) {

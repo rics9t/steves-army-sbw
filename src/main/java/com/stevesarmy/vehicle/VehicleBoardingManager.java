@@ -109,6 +109,10 @@ public final class VehicleBoardingManager {
         if (capacity <= 0) return -1;
         boolean crew = soldier.getRole() == SoldierRole.VEHICLE_CREW;
         if (crew && seatAvailable(vehicle, 0)) return 0;
+        if (!crew) {
+            int rifleSeat = SbwVehicles.firstFreeVisibleHandheldPassengerSeat(vehicle);
+            if (rifleSeat >= 1 && seatAvailable(vehicle, rifleSeat)) return rifleSeat;
+        }
         for (int seat = 1; seat < capacity; seat++) {
             if (seatAvailable(vehicle, seat)) return seat;
         }

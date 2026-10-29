@@ -180,8 +180,17 @@ public final class CrewAssignment {
             if (VehicleMountPolicy.canBoard(soldier, vehicle)
                 && isCloseEnoughToMount(soldier, vehicle)) {
                 boolean vehicleCrew = soldier.getRole() == SoldierRole.VEHICLE_CREW;
-                int wanted = vehicleCrew && SbwVehicles.passengerAt(vehicle, 0) == null
-                    ? 0 : SbwCompat.firstFreePassengerSeat(vehicle);
+                int wanted;
+                if (vehicleCrew) {
+                    wanted = SbwVehicles.passengerAt(vehicle, 0) == null
+                        ? 0 : SbwCompat.firstFreePassengerSeat(vehicle);
+                } else {
+                    // Ordinary riflemen cannot control SBW weapon stations. Put
+                    // them in an exposed, hand-capable seat first (T-90 seat 2),
+                    // so they can still fight with their own guns after boarding.
+                    wanted = SbwVehicles.firstFreeVisibleHandheldPassengerSeat(vehicle);
+                    if (wanted < 0) wanted = SbwCompat.firstFreePassengerSeat(vehicle);
+                }
                 if (wanted >= 0 && VS2Compat.seatSoldierOnEntityAtSeat(soldier, vehicle, wanted)) {
                     soldier.clearAttackTarget();
                     soldier.setTarget(null);

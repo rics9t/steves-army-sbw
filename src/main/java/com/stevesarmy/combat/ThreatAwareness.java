@@ -121,6 +121,13 @@ public class ThreatAwareness {
         updateSmoothDirection(Vec3.atCenterOf(pos));
     }
 
+    /** Remove the cover threat when this vehicle exposes a shootable occupant or ceases to be hostile. */
+    public void clearArmoredVehicleThreat(UUID vehicleId) {
+        if (vehicleId == null) return;
+        threats.removeIf(threat -> threat.source == ThreatSource.ARMORED_VEHICLE
+            && threat.entityId.equals(vehicleId));
+    }
+
     public void onEntityDetected(LivingEntity entity, Vec3 soldierPos) {
         onEntityDetected(entity, soldierPos, true);
     }

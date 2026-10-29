@@ -245,9 +245,11 @@ public final class ArmorThreatScanner {
                     continue;
                 }
                 if (!SbwCompat.hasHostileOccupant(soldier, vehicle)) {
+                    soldier.getThreatAwareness().clearArmoredVehicleThreat(vehicle.getUUID());
                     continue;
                 }
                 if (SbwCompat.hasFriendlyOccupant(soldier, vehicle)) {
+                    soldier.getThreatAwareness().clearArmoredVehicleThreat(vehicle.getUUID());
                     if (DiagnosticLogManager.isCoverLoggingEnabled()) {
                         StevesArmyMod.LOGGER.info(
                             "[ArmorDoctrine] Soldier {} SBW veto: vehicle {} carries friendly personnel",
@@ -270,10 +272,12 @@ public final class ArmorThreatScanner {
                     BlockPos.containing(hullCenter), hullCenter, velocity, corners,
                     0.8f, serverLevel, vehicleClass);
 
-                if ("TANK".equals(SbwCompat.getVehicleTypeName(vehicle))
-                    || SbwVehicles.hasButtonedUpCrewWithoutVisibleGunner(soldier, vehicle)) {
+                boolean buttonedUp = SbwVehicles.hasButtonedUpCrewWithoutVisibleGunner(soldier, vehicle);
+                if (buttonedUp && !hasNearbyShootableHostile(soldier, vehicle, serverLevel)) {
                     soldier.getThreatAwareness().onArmoredVehicleObserved(
                         vehicle.getUUID(), BlockPos.containing(hullCenter));
+                } else {
+                    soldier.getThreatAwareness().clearArmoredVehicleThreat(vehicle.getUUID());
                 }
 
                 double distSqr = soldier.distanceToSqr(hullCenter);
@@ -300,6 +304,23 @@ public final class ArmorThreatScanner {
             new Vec3(box.minX, box.maxY, box.maxZ),
             new Vec3(box.maxX, box.maxY, box.maxZ),
         };
+    }
+
+    /** Infantry may stay engaged with a tank while a nearby hostile person is still shootable. */
+    private static boolean hasNearbyShootableHostile(SoldierEntity soldier, Entity vehicle,
+                                                       ServerLevel level) {
+        double range = StevesArmyConfig.getBasicDetectionDistance();
+        double rangeSqr = range * range;
+        AABB area = soldier.getBoundingBox().inflate(range);
+        List<LivingEntity> candidates = level.getEntitiesOfClass(LivingEntity.class, area,
+            target -> target != soldier && target.isAlive() && target.getVehicle() != vehicle
+                && TargetAcquisition.isValidTarget(soldier, target)
+                && !soldier.isFriendlyTo(target) && soldier.isProactiveTarget(target)
+                && soldier.distanceToSqr(target) <= rangeSqr);
+        for (LivingEntity target : candidates) {
+            if (TargetAcquisition.hasLineOfSight(soldier, target)) return true;
+        }
+        return false;
     }
 
     /**

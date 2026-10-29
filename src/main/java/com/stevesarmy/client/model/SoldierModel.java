@@ -125,13 +125,11 @@ public class SoldierModel<T extends SoldierEntity> extends HumanoidModel<T> {
         boolean gun = GunIntegration.isGun(entity.getMainHandItem());
         float trackingYawLimit = entity.isPassenger() ? 75.0F : 30.0F;
         // The renderer hands us (headYaw - bodyYaw) unwrapped for non-living mounts such as
-        // SBW hulls. Near +-180 that is off by 360, which the clamp below turned into a one
-        // frame neck snap to the limit. Wrap first, then smooth while seated.
+        // SBW hulls. Near +-180 that is off by 360, which the clamp below turns into a
+        // one-frame neck snap to the limit. Wrap before applying the seat's exact pose.
         yaw = Mth.wrapDegrees(yaw);
-        motion.updateLook(age, Mth.clamp(yaw, -trackingYawLimit, trackingYawLimit),
-            Mth.clamp(pitch, -25.0f, 45.0f), entity.isPassenger());
-        float viewYaw = entity.isPassenger() ? motion.lookYaw : yaw;
-        float viewPitch = entity.isPassenger() ? motion.lookPitch : pitch;
+        float viewYaw = yaw;
+        float viewPitch = pitch;
         if (entity.deathTime > 0) {
             apply((entity.getId() & 1) == 0 ? SoldierAnimations.UNIT_DEATH : SoldierAnimations.UNIT_DEATH_BACK,
                 (entity.deathTime + partial) / 20, 1);
@@ -348,7 +346,6 @@ public class SoldierModel<T extends SoldierEntity> extends HumanoidModel<T> {
 
     private static final class Motion {
         float age = Float.NaN, crouch, ready, walk, coverAim, blend;
-        float lookAge = Float.NaN, lookYaw, lookPitch;
         String gunId, gunType = "rifle";
         void update(float now, float targetCrouch, float targetReady, float targetWalk) {
             if (Float.isNaN(age)) { age = now; crouch = targetCrouch; ready = targetReady; walk = targetWalk; blend = 1; return; }
@@ -357,18 +354,6 @@ public class SoldierModel<T extends SoldierEntity> extends HumanoidModel<T> {
             crouch = Mth.lerp(blend, crouch, targetCrouch);
             ready = Mth.lerp(blend, ready, targetReady);
             walk = Mth.lerp(blend, walk, targetWalk);
-        }
-        void updateLook(float now, float yaw, float pitch, boolean seated) {
-            if (!seated) { lookAge = Float.NaN; return; }
-            if (Float.isNaN(lookAge) || now < lookAge || now - lookAge > 10) {
-                lookYaw = yaw;
-                lookPitch = pitch;
-            } else {
-                float dt = Mth.clamp(now - lookAge, 0, 3);
-                lookYaw = Mth.approachDegrees(lookYaw, yaw, dt * 2.5f);
-                lookPitch = Mth.approach(lookPitch, pitch, dt * 2.5f);
-            }
-            lookAge = now;
         }
     }
 }
